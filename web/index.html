@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>股票池监控</title>
+  <link rel="stylesheet" href="/styles.css?v=20260620-2" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <strong>股票池</strong>
+        <span>监控台</span>
+      </div>
+      <nav class="menu">
+        <button class="menu-item active" type="button" data-pool="volume">放量股票池</button>
+        <button class="menu-item" type="button" data-pool="shadow">上影线试盘池</button>
+      </nav>
+    </aside>
+
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">放量股票池</h1>
+          <p id="pageDesc">量比突破股票监控</p>
+        </div>
+        <div class="market-visual" aria-hidden="true">
+          <img src="/assets/finance-dashboard.svg" alt="" />
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <label>开始日期 <input id="startDate" type="date" /></label>
+        <label>结束日期 <input id="endDate" type="date" /></label>
+        <label>最小成交额(亿) <input id="minAmount" type="number" min="0" step="0.1" placeholder="不限" /></label>
+        <label>最大成交额(亿) <input id="maxAmountInput" type="number" min="0" step="0.1" placeholder="不限" /></label>
+        <label class="shadow-filter cover-filter">
+          最新价高于等于首次
+          <input id="coverBelow" type="checkbox" />
+        </label>
+        <label>每页显示
+          <select id="pageSize">
+            <option value="10">10</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <button id="searchBtn" type="button">查询</button>
+      </section>
+
+      <section class="summary">
+        <div><span id="totalCount">0</span><small>条记录</small></div>
+        <div><span id="maxVol">-</span><small id="maxVolLabel">最高量比</small></div>
+        <div><span id="maxAmount">-</span><small>最高成交额(亿)</small></div>
+        <div><span id="status">Ready</span><small>状态</small></div>
+      </section>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th data-sort="stock_code">代码 <span class="sort-arrow"></span></th>
+              <th data-sort="stock_name">名称 <span class="sort-arrow"></span></th>
+              <th data-sort="sector_name">行业 <span class="sort-arrow"></span></th>
+              <th data-sort="close_price">收盘 <span class="sort-arrow"></span></th>
+              <th data-sort="max_price">最高 <span class="sort-arrow"></span></th>
+              <th data-sort="min_price">最低 <span class="sort-arrow"></span></th>
+              <th data-sort="rise"><span id="riseColumnLabel">涨跌幅</span> <span class="sort-arrow"></span></th>
+              <th data-sort="vol"><span id="volColumnLabel">量比</span> <span class="sort-arrow"></span></th>
+              <th data-sort="amount">成交额(亿) <span class="sort-arrow"></span></th>
+              <th class="shadow-only">首次覆盖价</th>
+              <th class="shadow-only">首次覆盖时间</th>
+              <th class="shadow-only">最新覆盖价</th>
+              <th class="shadow-only">最新覆盖时间</th>
+              <th data-sort="gmt_create">时间 <span class="sort-arrow"></span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+
+      <section class="pager">
+        <button id="prevPage" type="button">上一页</button>
+        <span id="pageInfo">第 1 / 1 页</span>
+        <button id="nextPage" type="button">下一页</button>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js?v=20260620-11"></script>
+</body>
+</html>

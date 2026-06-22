@@ -1,0 +1,25 @@
+{
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "password": "fxtkyzwx2021",
+    "database": "mars",
+    "charset": "utf8mb4"
+  },
+  "tonghuashun": {
+    "sector_url": "https://q.10jqka.com.cn/thshy/",
+    "stock_url_template": "https://q.10jqka.com.cn/thshy/detail/code/%d/field/199112/order/desc/page/%d/ajax/1/",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+    "v_js_path": "/etc/v.js",
+    "timeout_seconds": 20,
+    "stock_max_pages": 80,
+    "request_sleep_min_ms": 10000,
+    "request_sleep_max_ms": 20000,
+    "retry_count": 3,
+    "retry_sleep_ms": 10000
+  },
+  "server": {
+    "addr": ":8080"
+  }
+}

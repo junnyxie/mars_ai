@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 240" role="img" aria-label="Financial market dashboard illustration">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#172033"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" x2="1">
+      <stop offset="0" stop-color="#99f6e4"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="240" rx="18" fill="url(#bg)"/>
+  <g opacity=".16" fill="#fff">
+    <rect x="410" y="74" width="28" height="118" rx="4"/>
+    <rect x="448" y="48" width="28" height="144" rx="4"/>
+    <rect x="486" y="94" width="28" height="98" rx="4"/>
+    <rect x="524" y="34" width="28" height="158" rx="4"/>
+    <rect x="562" y="66" width="28" height="126" rx="4"/>
+  </g>
+  <g stroke="#d1fae5" stroke-width="2" opacity=".14">
+    <path d="M40 54h560M40 100h560M40 146h560M40 192h560"/>
+    <path d="M96 34v170M176 34v170M256 34v170M336 34v170M416 34v170M496 34v170M576 34v170"/>
+  </g>
+  <g stroke-linecap="round">
+    <path d="M64 172c44-36 70-21 106-58 32-33 62-42 104-10 38 29 70 34 108-12 44-53 84-40 128-8 23 17 43 15 66-5" fill="none" stroke="url(#line)" stroke-width="8"/>
+    <path d="M64 172c44-36 70-21 106-58 32-33 62-42 104-10 38 29 70 34 108-12 44-53 84-40 128-8 23 17 43 15 66-5" fill="none" stroke="#fff" stroke-width="2" opacity=".55"/>
+  </g>
+  <g>
+    <rect x="92" y="86" width="10" height="70" rx="3" fill="#34d399"/>
+    <rect x="87" y="106" width="20" height="30" rx="4" fill="#99f6e4"/>
+    <rect x="168" y="72" width="10" height="76" rx="3" fill="#f87171"/>
+    <rect x="163" y="88" width="20" height="42" rx="4" fill="#fecaca"/>
+    <rect x="248" y="64" width="10" height="98" rx="3" fill="#34d399"/>
+    <rect x="243" y="84" width="20" height="52" rx="4" fill="#99f6e4"/>
+    <rect x="328" y="78" width="10" height="76" rx="3" fill="#f87171"/>
+    <rect x="323" y="96" width="20" height="36" rx="4" fill="#fecaca"/>
+  </g>
+  <circle cx="512" cy="84" r="42" fill="#ffffff" opacity=".12"/>
+  <path d="M494 88l15 15 31-43" fill="none" stroke="#99f6e4" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
