@@ -952,7 +952,7 @@ func (r *VolumeRunner) scheduleDaily() {
 }
 
 func nextWeekdayRun(now time.Time) time.Time {
-	next := time.Date(now.Year(), now.Month(), now.Day(), 16, 10, 0, 0, now.Location())
+	next := time.Date(now.Year(), now.Month(), now.Day(), 15, 1, 0, 0, now.Location())
 	for !next.After(now) || next.Weekday() == time.Saturday || next.Weekday() == time.Sunday {
 		if !next.After(now) {
 			next = next.Add(24 * time.Hour)
