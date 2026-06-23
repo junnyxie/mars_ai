@@ -39,6 +39,10 @@
           最新价高于等于首次
           <input id="coverBelow" type="checkbox" />
         </label>
+        <label class="star-filter">
+          只看标星
+          <input id="starredOnly" type="checkbox" />
+        </label>
         <label>每页显示
           <select id="pageSize">
             <option value="10">10</option>
@@ -47,6 +51,7 @@
           </select>
         </label>
         <button id="searchBtn" type="button">查询</button>
+        <button id="deleteSelectedBtn" class="danger-btn" type="button" disabled>批量删除</button>
       </section>
 
       <section class="summary">
@@ -60,6 +65,8 @@
         <table>
           <thead>
             <tr>
+              <th class="select-col"><input id="selectAllRows" type="checkbox" aria-label="全选当前页" /></th>
+              <th data-sort="start" class="star-col">星标 <span class="sort-arrow"></span></th>
               <th data-sort="stock_code">代码 <span class="sort-arrow"></span></th>
               <th data-sort="stock_name">名称 <span class="sort-arrow"></span></th>
               <th data-sort="sector_name">行业 <span class="sort-arrow"></span></th>
@@ -74,6 +81,7 @@
               <th class="shadow-only">最新覆盖价</th>
               <th class="shadow-only">最新覆盖时间</th>
               <th data-sort="gmt_create">时间 <span class="sort-arrow"></span></th>
+              <th class="actions-col">操作</th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -87,6 +95,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260620-11"></script>
+  <script src="/app.js?v=20260623-1"></script>
 </body>
 </html>

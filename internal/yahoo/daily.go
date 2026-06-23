@@ -66,6 +66,7 @@ type chartResponse struct {
 					Close  []*float64 `json:"close"`
 					High   []*float64 `json:"high"`
 					Low    []*float64 `json:"low"`
+					Open   []*float64 `json:"open"`
 					Volume []*int64   `json:"volume"`
 				} `json:"quote"`
 			} `json:"indicators"`
@@ -226,6 +227,13 @@ func buildShadowStocks(meta StockMeta, quote dailyQuote, timestamps []int64, day
 		if closePrice == 0 {
 			continue
 		}
+		if todayIndex >= len(quote.Open) || quote.Open[todayIndex] == nil {
+			continue
+		}
+		openPrice := *quote.Open[todayIndex]
+		if closePrice <= openPrice {
+			continue
+		}
 		maxPrice := *quote.High[todayIndex]
 		minPrice := *quote.Low[todayIndex]
 		todayVolume := float64(*quote.Volume[todayIndex])
@@ -238,7 +246,7 @@ func buildShadowStocks(meta StockMeta, quote dailyQuote, timestamps []int64, day
 		}
 		highRise := (maxPrice - yesterdayClose) / yesterdayClose * 100
 		closeRise := (closePrice - yesterdayClose) / yesterdayClose * 100
-		if highRise <= 5 || highRise-closeRise <= 5 {
+		if closeRise <= 0 || highRise <= 5 || maxPrice-closePrice <= closePrice-openPrice {
 			continue
 		}
 		amount := todayVolume * closePrice
@@ -267,6 +275,7 @@ type dailyQuote struct {
 	Close  []*float64
 	High   []*float64
 	Low    []*float64
+	Open   []*float64
 	Volume []*int64
 }
 
@@ -312,6 +321,7 @@ func fetchDailyQuote(ctx context.Context, client *http.Client, meta StockMeta, p
 		Close:  quote.Close,
 		High:   quote.High,
 		Low:    quote.Low,
+		Open:   quote.Open,
 		Volume: quote.Volume,
 	}, result.Timestamp, symbol, nil
 }

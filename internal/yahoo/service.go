@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type VolumeStockRow struct {
 	Rise            float64 `json:"rise"`
 	Amount          float64 `json:"amount"`
 	Vol             float64 `json:"vol"`
+	Start           int     `json:"start"`
 	FirstCoverPrice float64 `json:"first_cover_price"`
 	FirstCoverTime  string  `json:"first_cover_time"`
 	NowCoverPrice   float64 `json:"now_cover_price"`
@@ -76,6 +78,19 @@ type StockPoolPage struct {
 	Total    int              `json:"total"`
 	Page     int              `json:"page"`
 	PageSize int              `json:"page_size"`
+}
+
+type deleteStockPoolRowsRequest struct {
+	IDs []int64 `json:"ids"`
+}
+
+type deleteStockPoolRowsResponse struct {
+	Deleted int64 `json:"deleted"`
+}
+
+type updateStockPoolStartRequest struct {
+	ID    int64 `json:"id"`
+	Start int   `json:"start"`
 }
 
 func NewVolumeRunner(db *sql.DB) *VolumeRunner {
@@ -461,6 +476,10 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	})
 	mux.HandleFunc("/api/volume-stocks", r.handleVolumeStocks)
 	mux.HandleFunc("/api/shadow-stocks", r.handleShadowStocks)
+	mux.HandleFunc("/api/volume-stocks/delete", r.handleDeleteVolumeStocks)
+	mux.HandleFunc("/api/shadow-stocks/delete", r.handleDeleteShadowStocks)
+	mux.HandleFunc("/api/volume-stocks/start", r.handleUpdateVolumeStart)
+	mux.HandleFunc("/api/shadow-stocks/start", r.handleUpdateShadowStart)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	go r.scheduleDaily()
@@ -532,8 +551,132 @@ func (r *VolumeRunner) handleShadowStocks(w http.ResponseWriter, req *http.Reque
 	_ = json.NewEncoder(w).Encode(page)
 }
 
+func (r *VolumeRunner) handleDeleteVolumeStocks(w http.ResponseWriter, req *http.Request) {
+	r.handleDeleteStockPoolRows(w, req, "volume_stock")
+}
+
+func (r *VolumeRunner) handleDeleteShadowStocks(w http.ResponseWriter, req *http.Request) {
+	r.handleDeleteStockPoolRows(w, req, "shadow_stock")
+}
+
+func (r *VolumeRunner) handleUpdateVolumeStart(w http.ResponseWriter, req *http.Request) {
+	r.handleUpdateStockPoolStart(w, req, "volume_stock")
+}
+
+func (r *VolumeRunner) handleUpdateShadowStart(w http.ResponseWriter, req *http.Request) {
+	r.handleUpdateStockPoolStart(w, req, "shadow_stock")
+}
+
+func (r *VolumeRunner) handleUpdateStockPoolStart(w http.ResponseWriter, req *http.Request, table string) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload updateStockPoolStartRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if payload.Start != 0 {
+		payload.Start = 1
+	}
+	if err := UpdateStockPoolStart(req.Context(), r.db, table, payload.ID, payload.Start); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": payload.ID, "start": payload.Start})
+}
+
+func (r *VolumeRunner) handleDeleteStockPoolRows(w http.ResponseWriter, req *http.Request, table string) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload deleteStockPoolRowsRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	deleted, err := DeleteStockPoolRows(req.Context(), r.db, table, payload.IDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(deleteStockPoolRowsResponse{Deleted: deleted})
+}
+
 func QueryVolumeStocks(ctx context.Context, db *sql.DB, req *http.Request) (StockPoolPage, error) {
 	return queryStockPoolRows(ctx, db, req, "volume_stock")
+}
+
+func DeleteStockPoolRows(ctx context.Context, db *sql.DB, table string, ids []int64) (int64, error) {
+	if table != "volume_stock" && table != "shadow_stock" {
+		return 0, fmt.Errorf("invalid stock pool table")
+	}
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("ids cannot be empty")
+	}
+	if len(ids) > 500 {
+		return 0, fmt.Errorf("delete at most 500 rows once")
+	}
+
+	seen := make(map[int64]struct{}, len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return 0, fmt.Errorf("invalid id")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return 0, fmt.Errorf("ids cannot be empty")
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
+	sqlText := fmt.Sprintf("DELETE FROM %s WHERE id IN (%s)", table, placeholders)
+	result, err := db.ExecContext(ctx, sqlText, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete %s rows failed: %w", table, err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read deleted rows failed: %w", err)
+	}
+	return deleted, nil
+}
+
+func UpdateStockPoolStart(ctx context.Context, db *sql.DB, table string, id int64, start int) error {
+	if table != "volume_stock" && table != "shadow_stock" {
+		return fmt.Errorf("invalid stock pool table")
+	}
+	if err := ensureStockPoolTable(ctx, db, table); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("invalid id")
+	}
+	if start != 0 {
+		start = 1
+	}
+	sqlText := fmt.Sprintf("UPDATE %s SET `start` = ? WHERE id = ?", table)
+	result, err := db.ExecContext(ctx, sqlText, start, id)
+	if err != nil {
+		return fmt.Errorf("update %s start failed: %w", table, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read updated rows failed: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("row not found")
+	}
+	return nil
 }
 
 func LoadShadowCoverRows(ctx context.Context, db *sql.DB) ([]ShadowCoverRow, error) {
@@ -607,12 +750,16 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	if table != "volume_stock" && table != "shadow_stock" {
 		return StockPoolPage{}, fmt.Errorf("invalid stock pool table")
 	}
+	if err := ensureStockPoolTable(ctx, db, table); err != nil {
+		return StockPoolPage{}, err
+	}
 	query := req.URL.Query()
 	startDate := query.Get("start")
 	endDate := query.Get("end")
 	minAmount := query.Get("min_amount")
 	maxAmount := query.Get("max_amount")
 	coverBelow := query.Get("cover_below")
+	starred := query.Get("starred")
 	sortField := allowedSortField(table, query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -667,6 +814,9 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 		}
 		where += " AND first_cover_price IS NOT NULL AND now_cover_price IS NOT NULL AND now_cover_price >= first_cover_price"
 	}
+	if starred == "1" {
+		where += " AND COALESCE(`start`, 0) = 1"
+	}
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s %s", table, where)
 	countArgs := append([]any(nil), args...)
 	var total int
@@ -681,7 +831,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	sqlText := fmt.Sprintf(`
 SELECT id, stock_code, stock_name, sector_id, COALESCE(sector_name, ''),
        COALESCE(close_price, 0), COALESCE(max_price, 0), COALESCE(min_price, 0),
-       COALESCE(%s, 0), COALESCE(amount, 0), COALESCE(%s, 0),
+       COALESCE(%s, 0), COALESCE(amount, 0), COALESCE(%s, 0), COALESCE(`+"`start`"+`, 0),
        %s,
        DATE_FORMAT(gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
 FROM %s
@@ -710,6 +860,7 @@ LIMIT ? OFFSET ?`, riseField, volField, coverFields, table, where, sortField, so
 			&row.Rise,
 			&row.Amount,
 			&row.Vol,
+			&row.Start,
 			&row.FirstCoverPrice,
 			&row.FirstCoverTime,
 			&row.NowCoverPrice,
@@ -766,6 +917,8 @@ func allowedSortField(table string, field string) string {
 			return "shadow_rate"
 		}
 		return "vol"
+	case "start":
+		return "`start`"
 	case "gmt_create":
 		return "gmt_create"
 	default:
@@ -843,6 +996,7 @@ CREATE TABLE IF NOT EXISTS volume_stock (
   rise DECIMAL(10,4) DEFAULT NULL COMMENT '涨跌幅',
   amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
   vol DECIMAL(10,4) DEFAULT NULL COMMENT '量比',
+  ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
@@ -851,6 +1005,9 @@ CREATE TABLE IF NOT EXISTS volume_stock (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='量比股票日行情表'`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure volume_stock table failed: %w", err)
+	}
+	if err := ensureStockPoolStartColumn(ctx, db, "volume_stock"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -873,6 +1030,7 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
   raise_rate DECIMAL(10,4) DEFAULT NULL COMMENT '收盘涨幅',
   amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
   shadow_rate DECIMAL(10,4) DEFAULT NULL COMMENT '上影率',
+  ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
@@ -881,6 +1039,44 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='上影线试盘股票表'`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure shadow_stock table failed: %w", err)
+	}
+	if err := ensureStockPoolStartColumn(ctx, db, "shadow_stock"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureStockPoolTable(ctx context.Context, db *sql.DB, table string) error {
+	switch table {
+	case "volume_stock":
+		return ensureVolumeStockTable(ctx, db)
+	case "shadow_stock":
+		return ensureShadowStockTable(ctx, db)
+	default:
+		return fmt.Errorf("invalid stock pool table")
+	}
+}
+
+func ensureStockPoolStartColumn(ctx context.Context, db *sql.DB, table string) error {
+	if table != "volume_stock" && table != "shadow_stock" {
+		return fmt.Errorf("invalid stock pool table")
+	}
+	var exists int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = ?
+  AND column_name = 'start'
+`, table).Scan(&exists); err != nil {
+		return fmt.Errorf("check %s start column failed: %w", table, err)
+	}
+	if exists > 0 {
+		return nil
+	}
+	sqlText := fmt.Sprintf("ALTER TABLE %s ADD COLUMN `start` INT NOT NULL DEFAULT 0 COMMENT '是否标星'", table)
+	if _, err := db.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("add %s start column failed: %w", table, err)
 	}
 	return nil
 }

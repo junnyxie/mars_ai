@@ -9,6 +9,7 @@ const endDateEl = document.querySelector("#endDate");
 const minAmountEl = document.querySelector("#minAmount");
 const maxAmountInputEl = document.querySelector("#maxAmountInput");
 const coverBelowEl = document.querySelector("#coverBelow");
+const starredOnlyEl = document.querySelector("#starredOnly");
 const pageSizeEl = document.querySelector("#pageSize");
 const prevPageEl = document.querySelector("#prevPage");
 const nextPageEl = document.querySelector("#nextPage");
@@ -18,12 +19,16 @@ const pageDescEl = document.querySelector("#pageDesc");
 const riseColumnLabelEl = document.querySelector("#riseColumnLabel");
 const volColumnLabelEl = document.querySelector("#volColumnLabel");
 const menuEl = document.querySelector(".menu");
+const selectAllRowsEl = document.querySelector("#selectAllRows");
+const deleteSelectedBtn = document.querySelector("#deleteSelectedBtn");
 
 const pools = {
   volume: {
     title: "放量股票池",
     desc: "量比突破股票监控",
     api: "/api/volume-stocks",
+    deleteApi: "/api/volume-stocks/delete",
+    startApi: "/api/volume-stocks/start",
     riseLabel: "涨跌幅",
     metricLabel: "量比",
     maxMetricLabel: "最高量比",
@@ -33,6 +38,8 @@ const pools = {
     title: "上影线试盘池",
     desc: "上影率来自 shadow_stock.shadow_rate，收盘涨幅来自 shadow_stock.raise_rate",
     api: "/api/shadow-stocks",
+    deleteApi: "/api/shadow-stocks/delete",
+    startApi: "/api/shadow-stocks/start",
     riseLabel: "收盘涨幅",
     metricLabel: "上影率",
     maxMetricLabel: "最高上影率",
@@ -89,6 +96,9 @@ function setStatus(text) {
 
 function resetSummary() {
   rowsEl.innerHTML = "";
+  selectAllRowsEl.checked = false;
+  selectAllRowsEl.indeterminate = false;
+  deleteSelectedBtn.disabled = true;
   totalCountEl.textContent = "0";
   maxVolEl.textContent = "-";
   maxAmountEl.textContent = "-";
@@ -114,6 +124,7 @@ async function loadRows() {
   if (minAmountEl.value !== "") params.set("min_amount", amountYiToRaw(minAmountEl.value));
   if (maxAmountInputEl.value !== "") params.set("max_amount", amountYiToRaw(maxAmountInputEl.value));
   if (poolName === "shadow" && coverBelowEl.checked) params.set("cover_below", "1");
+  if (starredOnlyEl.checked) params.set("starred", "1");
 
   try {
     const res = await fetch(`${pool.api}?${params}`);
@@ -141,6 +152,8 @@ function render(rows, poolName) {
     ` : "";
 	rowsEl.innerHTML = rows.map(row => `
     <tr>
+      <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
+      <td class="star-col"><button class="star-btn ${toNumber(row.start) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-start="${toNumber(row.start) === 1 ? 1 : 0}" aria-label="标星 ${row.stock_code}">★</button></td>
       <td class="code-cell">${row.stock_code}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
@@ -152,10 +165,14 @@ function render(rows, poolName) {
       <td>${formatAmountYi(row.amount)}</td>
       ${shadowCells(row)}
       <td class="muted">${row.gmt_create}</td>
+      <td class="actions-col"><button class="row-delete" type="button" data-id="${row.id}">删除</button></td>
     </tr>
   `).join("");
+  selectAllRowsEl.checked = false;
+  selectAllRowsEl.indeterminate = false;
+  updateSelectionState();
 
-  totalCountEl.textContent = rows.length;
+  totalCountEl.textContent = totalRows;
   const maxMetric = rows.length ? Math.max(...rows.map(row => toNumber(row.vol))) : null;
   maxVolEl.textContent = maxMetric === null ? "-" : `${formatNumber(maxMetric)}${pool.metricSuffix}`;
   maxAmountEl.textContent = rows.length ? formatAmountYi(Math.max(...rows.map(row => toNumber(row.amount)))) : "-";
@@ -195,6 +212,11 @@ document.querySelector("#searchBtn").addEventListener("click", () => {
 });
 
 coverBelowEl.addEventListener("change", () => {
+  currentPage = 1;
+  loadRows();
+});
+
+starredOnlyEl.addEventListener("change", () => {
   currentPage = 1;
   loadRows();
 });
@@ -242,6 +264,34 @@ nextPageEl.addEventListener("click", () => {
   loadRows();
 });
 
+selectAllRowsEl.addEventListener("change", () => {
+  document.querySelectorAll(".row-check").forEach(input => {
+    input.checked = selectAllRowsEl.checked;
+  });
+  updateSelectionState();
+});
+
+deleteSelectedBtn.addEventListener("click", () => {
+  deleteRows(getSelectedRowIDs());
+});
+
+rowsEl.addEventListener("change", event => {
+  if (event.target.classList.contains("row-check")) {
+    updateSelectionState();
+  }
+});
+
+rowsEl.addEventListener("click", event => {
+  const starButton = event.target.closest(".star-btn");
+  if (starButton) {
+    toggleStart(starButton);
+    return;
+  }
+  const button = event.target.closest(".row-delete");
+  if (!button) return;
+  deleteRows([toNumber(button.dataset.id)]);
+});
+
 function getTotalPages() {
   return Math.max(1, Math.ceil(totalRows / toNumber(pageSizeEl.value || 50)));
 }
@@ -259,6 +309,72 @@ function updateSortArrows() {
     if (!arrow) return;
     arrow.textContent = th.dataset.sort === sortField ? (sortDir === "desc" ? "↓" : "↑") : "";
   });
+}
+
+function getSelectedRowIDs() {
+  return Array.from(document.querySelectorAll(".row-check:checked"))
+    .map(input => toNumber(input.value))
+    .filter(id => id > 0);
+}
+
+function updateSelectionState() {
+  const checks = Array.from(document.querySelectorAll(".row-check"));
+  const checkedCount = checks.filter(input => input.checked).length;
+  selectAllRowsEl.checked = checks.length > 0 && checkedCount === checks.length;
+  selectAllRowsEl.indeterminate = checkedCount > 0 && checkedCount < checks.length;
+  deleteSelectedBtn.disabled = checkedCount === 0;
+}
+
+async function deleteRows(ids) {
+  if (!ids.length) return;
+  const pool = pools[currentPool];
+  const message = ids.length === 1 ? "确认删除这条记录？" : `确认删除选中的 ${ids.length} 条记录？`;
+  if (!window.confirm(message)) return;
+  setStatus("Deleting");
+  try {
+    const res = await fetch(pool.deleteApi, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await res.json();
+    if (rowsEl.children.length === ids.length && currentPage > 1) {
+      currentPage -= 1;
+    }
+    await loadRows();
+  } catch (err) {
+    setStatus(err.message);
+  }
+}
+
+async function toggleStart(button) {
+  const id = toNumber(button.dataset.id);
+  if (!id) return;
+  const nextStart = toNumber(button.dataset.start) === 1 ? 0 : 1;
+  const previousStart = toNumber(button.dataset.start) === 1 ? 1 : 0;
+  button.disabled = true;
+  button.dataset.start = String(nextStart);
+  button.classList.toggle("active", nextStart === 1);
+  setStatus("Saving");
+  try {
+    const res = await fetch(pools[currentPool].startApi, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, start: nextStart })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    setStatus("Ready");
+    if (starredOnlyEl.checked && nextStart === 0) {
+      await loadRows();
+    }
+  } catch (err) {
+    button.dataset.start = String(previousStart);
+    button.classList.toggle("active", previousStart === 1);
+    setStatus(err.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 startDateEl.value = today();
