@@ -104,7 +104,7 @@ func (c *Config) Validate() error {
 		c.Tonghuashun.RetrySleepMS = 10000
 	}
 	if c.Server.Addr == "" {
-		c.Server.Addr = ":8080"
+		c.Server.Addr = "0.0.0.0:8080"
 	}
 	return nil
 }
