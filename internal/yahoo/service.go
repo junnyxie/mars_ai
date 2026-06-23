@@ -930,8 +930,12 @@ func (r *VolumeRunner) scheduleDaily() {
 	for {
 		now := time.Now()
 		next := nextWeekdayRun(now)
-		log.Printf("[schedule] next stock pool run at %s", next.Format(time.RFC3339))
-		time.Sleep(time.Until(next))
+		wait := time.Until(next)
+		if wait <= 0 {
+			continue
+		}
+		log.Printf("[schedule] waiting next stock pool run at %s wait=%s", next.Format(time.RFC3339), wait.Round(time.Second))
+		time.Sleep(wait)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		result, err := r.RunAllDays(ctx, 1)
 		if err != nil {
@@ -952,9 +956,14 @@ func (r *VolumeRunner) scheduleDaily() {
 }
 
 func nextWeekdayRun(now time.Time) time.Time {
-	next := time.Date(now.Year(), now.Month(), now.Day(), 15, 1, 0, 0, now.Location())
-	for !next.After(now) || next.Weekday() == time.Saturday || next.Weekday() == time.Sunday {
-		if !next.After(now) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		location = time.FixedZone("Asia/Shanghai", 8*60*60)
+	}
+	localNow := now.In(location)
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 15, 1, 0, 0, location)
+	for !next.After(localNow) || next.Weekday() == time.Saturday || next.Weekday() == time.Sunday {
+		if !next.After(localNow) {
 			next = next.Add(24 * time.Hour)
 			continue
 		}
@@ -1002,7 +1011,7 @@ CREATE TABLE IF NOT EXISTS volume_stock (
   PRIMARY KEY (id),
   KEY idx_stock_code (stock_code),
   KEY idx_sector_id (sector_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='量比股票日行情表'`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='量比股票日行情表'`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure volume_stock table failed: %w", err)
 	}
@@ -1036,7 +1045,7 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
   PRIMARY KEY (id),
   KEY idx_stock_code (stock_code),
   KEY idx_sector_id (sector_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='上影线试盘股票表'`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='上影线试盘股票表'`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure shadow_stock table failed: %w", err)
 	}

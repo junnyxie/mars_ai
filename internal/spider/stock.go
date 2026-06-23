@@ -407,7 +407,7 @@ CREATE TABLE IF NOT EXISTS stock_crawl_progress (
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
   UNIQUE KEY uk_sector_id (sector_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='股票爬取进度表'`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='股票爬取进度表'`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure stock_crawl_progress table failed: %w", err)
 	}
