@@ -301,12 +301,11 @@ button:disabled {
 
 .macro-heatmap {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 18px;
   grid-template-rows: repeat(3, 18px);
   gap: 6px;
   min-height: 66px;
   align-items: stretch;
+  width: max-content;
 }
 
 .macro-cell {

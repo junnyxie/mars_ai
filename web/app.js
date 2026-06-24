@@ -562,8 +562,9 @@ function renderMacroMarket(data) {
   if (history.length === 0) {
     macroChartEl.innerHTML = `<div class="macro-empty">暂无历史评分</div>`;
   } else {
+    const columns = Math.ceil(history.length / 3);
     macroChartEl.innerHTML = `
-      <div class="macro-heatmap">
+      <div class="macro-heatmap" style="grid-template-columns: repeat(${columns}, 18px);">
         ${history.map(item => `
           <button class="macro-cell ${item.trade_date === latest.trade_date ? "active" : ""} macro-level-${item.market_level || 0}" type="button" data-date="${item.trade_date}" title="${item.trade_date} ${formatNumber(item.total_score, 2)} ${item.market_status || ""}" aria-label="${item.trade_date} ${formatNumber(item.total_score, 2)} ${item.market_status || ""}">
           </button>
