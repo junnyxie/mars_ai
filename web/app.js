@@ -21,6 +21,17 @@ const volColumnLabelEl = document.querySelector("#volColumnLabel");
 const menuEl = document.querySelector(".menu");
 const selectAllRowsEl = document.querySelector("#selectAllRows");
 const deleteSelectedBtn = document.querySelector("#deleteSelectedBtn");
+const exportBtn = document.querySelector("#exportBtn");
+const macroPanelEl = document.querySelector("#macroPanel");
+const macroDateEl = document.querySelector("#macroDate");
+const macroScoreEl = document.querySelector("#macroScore");
+const macroStatusEl = document.querySelector("#macroStatus");
+const macroRiskEl = document.querySelector("#macroRisk");
+const macroCommodityEl = document.querySelector("#macroCommodity");
+const macroLiquidityEl = document.querySelector("#macroLiquidity");
+const macroChartEl = document.querySelector("#macroChart");
+const macroRowsEl = document.querySelector("#macroRows");
+const macroSummaryEl = document.querySelector("#macroSummary");
 
 const pools = {
   volume: {
@@ -36,14 +47,34 @@ const pools = {
   },
   shadow: {
     title: "上影线试盘池",
-    desc: "上影率来自 shadow_stock.shadow_rate，收盘涨幅来自 shadow_stock.raise_rate",
+    desc: "最高价涨幅来自 shadow_stock.high_rate，收盘涨幅来自 shadow_stock.raise_rate",
     api: "/api/shadow-stocks",
     deleteApi: "/api/shadow-stocks/delete",
     startApi: "/api/shadow-stocks/start",
     riseLabel: "收盘涨幅",
-    metricLabel: "上影率",
-    maxMetricLabel: "最高上影率",
+    metricLabel: "最高价涨幅",
+    maxMetricLabel: "最高价涨幅",
     metricSuffix: "%"
+  },
+  breakout: {
+    title: "突破股票池",
+    desc: "近三日高点递增，收盘价与前高价接近，成交量接近前高日",
+    api: "/api/breakout-stocks",
+    deleteApi: "/api/breakout-stocks/delete",
+    startApi: "/api/breakout-stocks/start",
+    riseLabel: "涨跌幅",
+    metricLabel: "量能接近度",
+    maxMetricLabel: "最高量能比",
+    metricSuffix: ""
+  },
+  macro: {
+    title: "宏观数据",
+    desc: "全球指数、商品、美元和美债收益率的宏观强弱评分",
+    api: "/api/macro-market",
+    riseLabel: "涨跌幅",
+    metricLabel: "宏观评分",
+    maxMetricLabel: "总评分",
+    metricSuffix: ""
   }
 };
 
@@ -85,6 +116,18 @@ function formatCoverTime(value) {
   return value ? String(value).slice(0, 10) : "-";
 }
 
+function xueqiuSymbol(stockCode) {
+  const code = String(stockCode || "").trim();
+  if (!code) return "";
+  const prefix = code.startsWith("6") ? "SH" : "SZ";
+  return `${prefix}${code}`;
+}
+
+function xueqiuLink(stockCode) {
+  const symbol = xueqiuSymbol(stockCode);
+  return symbol ? `https://xueqiu.com/S/${symbol}` : "";
+}
+
 function amountYiToRaw(value) {
   if (value === "") return "";
   return String(toNumber(value) * 100000000);
@@ -92,6 +135,22 @@ function amountYiToRaw(value) {
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+function buildQueryParams() {
+  const params = new URLSearchParams({
+    start: startDateEl.value,
+    end: endDateEl.value,
+    sort: sortField,
+    dir: sortDir,
+    page: String(currentPage),
+    page_size: pageSizeEl.value
+  });
+  if (minAmountEl.value !== "") params.set("min_amount", amountYiToRaw(minAmountEl.value));
+  if (maxAmountInputEl.value !== "") params.set("max_amount", amountYiToRaw(maxAmountInputEl.value));
+  if (currentPool === "shadow" && coverBelowEl.checked) params.set("cover_below", "1");
+  if (starredOnlyEl.checked) params.set("starred", "1");
+  return params;
 }
 
 function resetSummary() {
@@ -110,21 +169,14 @@ function resetSummary() {
 async function loadRows() {
   const poolName = currentPool;
   const pool = pools[poolName];
+  if (poolName === "macro") {
+    await loadMacroMarket();
+    return;
+  }
   const seq = ++requestSeq;
   setStatus("Loading");
 
-  const params = new URLSearchParams({
-    start: startDateEl.value,
-    end: endDateEl.value,
-    sort: sortField,
-    dir: sortDir,
-    page: String(currentPage),
-    page_size: pageSizeEl.value
-  });
-  if (minAmountEl.value !== "") params.set("min_amount", amountYiToRaw(minAmountEl.value));
-  if (maxAmountInputEl.value !== "") params.set("max_amount", amountYiToRaw(maxAmountInputEl.value));
-  if (poolName === "shadow" && coverBelowEl.checked) params.set("cover_below", "1");
-  if (starredOnlyEl.checked) params.set("starred", "1");
+  const params = buildQueryParams();
 
   try {
     const res = await fetch(`${pool.api}?${params}`);
@@ -144,17 +196,27 @@ async function loadRows() {
 
 function render(rows, poolName) {
 	const pool = pools[poolName];
+	const stockCodeCell = row => {
+		const href = xueqiuLink(row.stock_code);
+		if (!href) return row.stock_code || "";
+		return `<a class="stock-link" href="${href}" target="_blank" rel="noopener noreferrer">${row.stock_code}</a>`;
+	};
 	const shadowCells = row => poolName === "shadow" ? `
       <td>${formatCoverPrice(row.first_cover_price)}</td>
       <td class="muted">${formatCoverTime(row.first_cover_time)}</td>
       <td>${formatCoverPrice(row.now_cover_price)}</td>
       <td class="muted">${formatCoverTime(row.now_cover_time)}</td>
     ` : "";
+	const breakoutCells = row => poolName === "breakout" ? `
+      <td>${formatNumber(row.before_max_price)}</td>
+      <td>${formatNumber(row.before_max_vol, 0)}</td>
+      <td class="muted">${formatCoverTime(row.before_max_time)}</td>
+    ` : "";
 	rowsEl.innerHTML = rows.map(row => `
     <tr>
       <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
       <td class="star-col"><button class="star-btn ${toNumber(row.start) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-start="${toNumber(row.start) === 1 ? 1 : 0}" aria-label="标星 ${row.stock_code}">★</button></td>
-      <td class="code-cell">${row.stock_code}</td>
+      <td class="code-cell">${stockCodeCell(row)}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
       <td>${formatNumber(row.close_price)}</td>
@@ -163,6 +225,7 @@ function render(rows, poolName) {
       <td class="${toNumber(row.rise) >= 0 ? "rise-up" : ""}">${formatNumber(row.rise)}%</td>
       <td class="metric-cell">${formatNumber(row.vol)}${pool.metricSuffix}</td>
       <td>${formatAmountYi(row.amount)}</td>
+      ${breakoutCells(row)}
       ${shadowCells(row)}
       <td class="muted">${row.gmt_create}</td>
       <td class="actions-col"><button class="row-delete" type="button" data-id="${row.id}">删除</button></td>
@@ -201,6 +264,14 @@ function applyPool(poolName) {
 		item.classList.toggle("active", item.dataset.pool === poolName);
 	});
 	document.body.classList.toggle("shadow-mode", poolName === "shadow");
+	document.body.classList.toggle("breakout-mode", poolName === "breakout");
+	document.body.classList.toggle("macro-mode", poolName === "macro");
+  const isMacro = poolName === "macro";
+  document.querySelector(".toolbar").style.display = isMacro ? "none" : "";
+  document.querySelector(".summary").style.display = isMacro ? "none" : "";
+  document.querySelector(".table-wrap").style.display = isMacro ? "none" : "";
+  document.querySelector(".pager").style.display = isMacro ? "none" : "";
+  macroPanelEl.style.display = isMacro ? "grid" : "none";
 	resetSummary();
   updateSortArrows();
   loadRows();
@@ -209,6 +280,10 @@ function applyPool(poolName) {
 document.querySelector("#searchBtn").addEventListener("click", () => {
   currentPage = 1;
   loadRows();
+});
+
+exportBtn.addEventListener("click", () => {
+  exportForChatGPT();
 });
 
 coverBelowEl.addEventListener("change", () => {
@@ -375,6 +450,133 @@ async function toggleStart(button) {
   } finally {
     button.disabled = false;
   }
+}
+
+async function exportForChatGPT() {
+  const params = buildQueryParams();
+  params.set("pool", currentPool);
+  exportBtn.disabled = true;
+  setStatus("Exporting");
+  try {
+    const res = await fetch(`/api/stock-pool/export?${params}`);
+    if (!res.ok) throw new Error(await res.text());
+    const markdown = await res.text();
+    await copyText(markdown);
+    setStatus("Copied");
+  } catch (err) {
+    setStatus(err.message);
+  } finally {
+    exportBtn.disabled = false;
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+async function loadMacroMarket() {
+  const seq = ++requestSeq;
+  setStatus("Loading");
+  macroStatusEl.textContent = "Loading";
+  macroRowsEl.innerHTML = "";
+  macroChartEl.innerHTML = "";
+  try {
+    const res = await fetch("/api/macro-market?limit=60");
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (seq !== requestSeq || currentPool !== "macro") return;
+    renderMacroMarket(data);
+    setStatus("Ready");
+  } catch (err) {
+    if (seq === requestSeq && currentPool === "macro") {
+      setStatus(err.message);
+      macroDateEl.textContent = "-";
+      macroScoreEl.textContent = "-";
+      macroStatusEl.textContent = err.message;
+      macroRiskEl.textContent = "-";
+      macroCommodityEl.textContent = "-";
+      macroLiquidityEl.textContent = "-";
+      macroChartEl.innerHTML = `<div class="macro-empty">${err.message}</div>`;
+      macroRowsEl.innerHTML = "";
+      macroSummaryEl.textContent = "-";
+    }
+  }
+}
+
+function renderMacroMarket(data) {
+  const latest = data.latest || {};
+  if (!latest.trade_date) {
+    macroDateEl.textContent = "-";
+    macroScoreEl.textContent = "-";
+    macroStatusEl.textContent = "暂无宏观数据";
+    macroRiskEl.textContent = "-";
+    macroCommodityEl.textContent = "-";
+    macroLiquidityEl.textContent = "-";
+    macroChartEl.innerHTML = `<div class="macro-empty">暂无历史评分，请先调用 /api/macro-market/run?days=1</div>`;
+    macroRowsEl.innerHTML = "";
+    macroSummaryEl.textContent = "-";
+    return;
+  }
+  const history = (data.history || []).slice().reverse().slice(-60);
+  const details = data.details || {};
+  const renderSnapshot = item => {
+    const rows = details[item.trade_date] || item.rows || [];
+    macroDateEl.textContent = item.trade_date || "-";
+    macroScoreEl.textContent = item.total_score == null ? "-" : formatNumber(item.total_score, 2);
+    macroStatusEl.textContent = item.market_status || "-";
+    macroRiskEl.textContent = item.risk_score ?? "-";
+    macroCommodityEl.textContent = item.commodity_score ?? "-";
+    macroLiquidityEl.textContent = item.liquidity_score ?? "-";
+    macroScoreEl.className = `macro-level-${item.market_level || 0}`;
+    macroSummaryEl.textContent = item.summary || "-";
+    macroRowsEl.innerHTML = rows.map(row => `
+      <div class="macro-item">
+        <span>${row.market_name}</span>
+        <strong>${formatNumber(row.close_price, 2)}</strong>
+        <small class="${toNumber(row.rise) >= 0 ? "rise-up" : ""}">${formatNumber(row.rise, 2)}%</small>
+      </div>
+    `).join("");
+  };
+
+  renderSnapshot(latest);
+
+  if (history.length === 0) {
+    macroChartEl.innerHTML = `<div class="macro-empty">暂无历史评分</div>`;
+  } else {
+    macroChartEl.innerHTML = `
+      <div class="macro-heatmap">
+        ${history.map(item => `
+          <button class="macro-cell ${item.trade_date === latest.trade_date ? "active" : ""} macro-level-${item.market_level || 0}" type="button" data-date="${item.trade_date}" title="${item.trade_date} ${formatNumber(item.total_score, 2)} ${item.market_status || ""}">
+          </button>
+        `).join("")}
+      </div>
+    `;
+    macroChartEl.querySelectorAll(".macro-cell").forEach(cell => {
+      cell.addEventListener("click", () => {
+        const item = history.find(historyItem => historyItem.trade_date === cell.dataset.date);
+        if (!item) return;
+        macroChartEl.querySelectorAll(".macro-cell").forEach(node => node.classList.remove("active"));
+        cell.classList.add("active");
+        renderSnapshot(item);
+      });
+    });
+  }
+}
+
+function macroBarHeight(score) {
+  return Math.max(12, Math.min(100, Math.round((Math.abs(toNumber(score)) / 2) * 100)));
 }
 
 startDateEl.value = today();

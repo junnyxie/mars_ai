@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>股票池监控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260620-2" />
+  <link rel="stylesheet" href="/styles.css?v=20260624-9" />
 </head>
 <body>
   <div class="app-shell">
@@ -16,6 +16,8 @@
       <nav class="menu">
         <button class="menu-item active" type="button" data-pool="volume">放量股票池</button>
         <button class="menu-item" type="button" data-pool="shadow">上影线试盘池</button>
+        <button class="menu-item" type="button" data-pool="breakout">突破股票池</button>
+        <button class="menu-item" type="button" data-pool="macro">宏观数据</button>
       </nav>
     </aside>
 
@@ -51,6 +53,7 @@
           </select>
         </label>
         <button id="searchBtn" type="button">查询</button>
+        <button id="exportBtn" type="button">导出给 ChatGPT</button>
         <button id="deleteSelectedBtn" class="danger-btn" type="button" disabled>批量删除</button>
       </section>
 
@@ -59,6 +62,24 @@
         <div><span id="maxVol">-</span><small id="maxVolLabel">最高量比</small></div>
         <div><span id="maxAmount">-</span><small>最高成交额(亿)</small></div>
         <div><span id="status">Ready</span><small>状态</small></div>
+      </section>
+
+      <section id="macroPanel" class="macro-panel">
+        <div class="macro-score-card">
+          <span id="macroDate">-</span>
+          <strong id="macroScore">-</strong>
+          <small id="macroStatus">-</small>
+          <div class="macro-score-parts">
+            <span>风险 <b id="macroRisk">-</b></span>
+            <span>商品 <b id="macroCommodity">-</b></span>
+            <span>流动性 <b id="macroLiquidity">-</b></span>
+          </div>
+        </div>
+        <div>
+          <div id="macroChart" class="macro-chart"></div>
+          <div id="macroRows" class="macro-grid"></div>
+        </div>
+        <div id="macroSummary" class="macro-summary">-</div>
       </section>
 
       <section class="table-wrap">
@@ -76,6 +97,9 @@
               <th data-sort="rise"><span id="riseColumnLabel">涨跌幅</span> <span class="sort-arrow"></span></th>
               <th data-sort="vol"><span id="volColumnLabel">量比</span> <span class="sort-arrow"></span></th>
               <th data-sort="amount">成交额(亿) <span class="sort-arrow"></span></th>
+              <th class="breakout-only" data-sort="before_max_price">前高价 <span class="sort-arrow"></span></th>
+              <th class="breakout-only" data-sort="before_max_vol">前高日成交量 <span class="sort-arrow"></span></th>
+              <th class="breakout-only" data-sort="before_max_time">前高日期 <span class="sort-arrow"></span></th>
               <th class="shadow-only">首次覆盖价</th>
               <th class="shadow-only">首次覆盖时间</th>
               <th class="shadow-only">最新覆盖价</th>
@@ -95,6 +119,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260623-1"></script>
+  <script src="/app.js?v=20260624-9"></script>
 </body>
 </html>

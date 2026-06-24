@@ -37,8 +37,9 @@ type CoverRunResult struct {
 }
 
 type CombinedRunResult struct {
-	Volume RunResult `json:"volume"`
-	Shadow RunResult `json:"shadow"`
+	Volume   RunResult `json:"volume"`
+	Shadow   RunResult `json:"shadow"`
+	Breakout RunResult `json:"breakout"`
 }
 
 type VolumeStockRow struct {
@@ -54,6 +55,9 @@ type VolumeStockRow struct {
 	Amount          float64 `json:"amount"`
 	Vol             float64 `json:"vol"`
 	Start           int     `json:"start"`
+	BeforeMaxPrice  float64 `json:"before_max_price"`
+	BeforeMaxVol    float64 `json:"before_max_vol"`
+	BeforeMaxTime   string  `json:"before_max_time"`
 	FirstCoverPrice float64 `json:"first_cover_price"`
 	FirstCoverTime  string  `json:"first_cover_time"`
 	NowCoverPrice   float64 `json:"now_cover_price"`
@@ -104,6 +108,36 @@ func (r *VolumeRunner) Run(ctx context.Context) (RunResult, error) {
 	return r.RunDays(ctx, 1)
 }
 
+func (r *VolumeRunner) RunMacroMarketDays(ctx context.Context, days int) (MacroMarketPreview, error) {
+	if days < 1 || days > 60 {
+		return MacroMarketPreview{}, fmt.Errorf("days must be between 1 and 60")
+	}
+	if err := ensureMacroMarketDailyTable(ctx, r.db); err != nil {
+		return MacroMarketPreview{}, err
+	}
+	result := FetchMacroMarketDays(ctx, r.client, time.Now(), days)
+	for index, item := range result.Rows {
+		if item.Error != "" {
+			log.Printf("[macro] skip symbol=%s name=%s date=%s err=%s", item.Symbol, item.MarketName, item.TradeDate, item.Error)
+			continue
+		}
+		inserted, err := insertMacroMarketItem(ctx, r.db, item)
+		if err != nil {
+			result.Failed++
+			result.Rows[index].Error = err.Error()
+			log.Printf("[macro] insert failed symbol=%s name=%s date=%s err=%v", item.Symbol, item.MarketName, item.TradeDate, err)
+			continue
+		}
+		if inserted {
+			result.Inserted++
+		} else {
+			result.Updated++
+		}
+		log.Printf("[macro] saved symbol=%s name=%s date=%s close=%.4f rise=%.4f inserted=%t", item.Symbol, item.MarketName, item.TradeDate, item.ClosePrice, item.Rise, inserted)
+	}
+	return result, nil
+}
+
 func (r *VolumeRunner) RunDays(ctx context.Context, days int) (RunResult, error) {
 	if days < 1 || days > 60 {
 		return RunResult{}, fmt.Errorf("days must be between 1 and 60")
@@ -140,9 +174,11 @@ func (r *VolumeRunner) RunDays(ctx context.Context, days int) (RunResult, error)
 		if err != nil {
 			result.Failed++
 			log.Printf("[volume] fetch failed stock_code=%s stock_name=%s err=%v", meta.StockCode, meta.StockName, err)
+			logRunProgress("volume", index+1, len(stocks), meta, result)
 			continue
 		}
 		r.insertVolumeStocks(ctx, volumes, &result)
+		logRunProgress("volume", index+1, len(stocks), meta, result)
 	}
 	return result, nil
 }
@@ -183,9 +219,66 @@ func (r *VolumeRunner) RunShadowDays(ctx context.Context, days int) (RunResult, 
 		if err != nil {
 			result.Failed++
 			log.Printf("[shadow] fetch failed stock_code=%s stock_name=%s err=%v", meta.StockCode, meta.StockName, err)
+			logRunProgress("shadow", index+1, len(stocks), meta, result)
 			continue
 		}
 		r.insertShadowStocks(ctx, shadows, &result)
+		logRunProgress("shadow", index+1, len(stocks), meta, result)
+	}
+	return result, nil
+}
+
+func (r *VolumeRunner) RunBreakoutDays(ctx context.Context, days int) (RunResult, error) {
+	if days < 1 || days > 60 {
+		return RunResult{}, fmt.Errorf("days must be between 1 and 60")
+	}
+	log.Printf("[breakout] run start days=%d", days)
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return RunResult{}, fmt.Errorf("stock pool job is already running")
+	}
+	r.running = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		r.mu.Unlock()
+	}()
+
+	if err := ensureBreakoutStockTable(ctx, r.db); err != nil {
+		return RunResult{}, err
+	}
+
+	stocks, err := LoadYahooSupportedStocks(ctx, r.db)
+	if err != nil {
+		return RunResult{}, err
+	}
+	log.Printf("[breakout] loaded stocks total=%d", len(stocks))
+
+	period1, period2 := yahooPeriods(time.Now(), days)
+	log.Printf("[breakout] yahoo period period1=%d period2=%d days=%d", period1, period2, days)
+	result := RunResult{TotalStocks: len(stocks)}
+	for index, meta := range stocks {
+		if index > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		quote, timestamps, _, err := fetchDailyQuote(ctx, r.client, meta, period1, period2)
+		if err != nil {
+			result.Failed++
+			log.Printf("[breakout] fetch failed stock_code=%s stock_name=%s err=%v", meta.StockCode, meta.StockName, err)
+			logRunProgress("breakout", index+1, len(stocks), meta, result)
+			continue
+		}
+		breakouts, err := buildBreakoutStocks(meta, quote, timestamps, days)
+		if err != nil {
+			result.Failed++
+			log.Printf("[breakout] build failed stock_code=%s stock_name=%s err=%v", meta.StockCode, meta.StockName, err)
+			logRunProgress("breakout", index+1, len(stocks), meta, result)
+			continue
+		}
+		r.insertBreakoutStocks(ctx, breakouts, &result)
+		logRunProgress("breakout", index+1, len(stocks), meta, result)
 	}
 	return result, nil
 }
@@ -227,6 +320,67 @@ func (r *VolumeRunner) insertShadowStocks(ctx context.Context, shadows []ShadowS
 	}
 }
 
+func (r *VolumeRunner) insertBreakoutStocks(ctx context.Context, breakouts []BreakoutStock, result *RunResult) {
+	if len(breakouts) == 0 {
+		result.Skipped++
+		return
+	}
+	for _, breakout := range breakouts {
+		if err := InsertBreakoutStock(ctx, r.db, breakout); err != nil {
+			result.Failed++
+			log.Printf("[breakout] insert failed stock_code=%s stock_name=%s date=%s err=%v", breakout.StockCode, breakout.StockName, breakout.GmtCreate.Format("2006-01-02"), err)
+			continue
+		}
+		result.Inserted++
+		log.Printf("[breakout] inserted and committed stock_code=%s stock_name=%s date=%s vol=%.2f before_max=%.2f before_max_time=%s amount=%.4f", breakout.StockCode, breakout.StockName, breakout.GmtCreate.Format("2006-01-02"), breakout.Vol, breakout.BeforeMaxPrice, breakout.BeforeMaxTime.Format("2006-01-02"), breakout.Amount)
+	}
+}
+
+func logRunProgress(name string, current int, total int, meta StockMeta, result RunResult) {
+	log.Printf("[%s] progress current=%d total=%d stock_code=%s stock_name=%s region=%s sector_id=%d sector_name=%s inserted=%d skipped=%d failed=%d",
+		name,
+		current,
+		total,
+		meta.StockCode,
+		meta.StockName,
+		meta.Region,
+		meta.SectorID,
+		stockMetaSectorName(meta),
+		result.Inserted,
+		result.Skipped,
+		result.Failed,
+	)
+}
+
+func logCombinedRunProgress(name string, current int, total int, meta StockMeta, result CombinedRunResult) {
+	log.Printf("[%s] progress current=%d total=%d stock_code=%s stock_name=%s region=%s sector_id=%d sector_name=%s volume={inserted=%d skipped=%d failed=%d} shadow={inserted=%d skipped=%d failed=%d} breakout={inserted=%d skipped=%d failed=%d}",
+		name,
+		current,
+		total,
+		meta.StockCode,
+		meta.StockName,
+		meta.Region,
+		meta.SectorID,
+		stockMetaSectorName(meta),
+		result.Volume.Inserted,
+		result.Volume.Skipped,
+		result.Volume.Failed,
+		result.Shadow.Inserted,
+		result.Shadow.Skipped,
+		result.Shadow.Failed,
+		result.Breakout.Inserted,
+		result.Breakout.Skipped,
+		result.Breakout.Failed,
+	)
+}
+
+func stockMetaSectorName(meta StockMeta) string {
+	if meta.SectorName.Valid {
+		return meta.SectorName.String
+	}
+	return ""
+}
+
 func (r *VolumeRunner) RunAllDays(ctx context.Context, days int) (CombinedRunResult, error) {
 	if days < 1 || days > 60 {
 		return CombinedRunResult{}, fmt.Errorf("days must be between 1 and 60")
@@ -250,6 +404,9 @@ func (r *VolumeRunner) RunAllDays(ctx context.Context, days int) (CombinedRunRes
 	if err := ensureShadowStockTable(ctx, r.db); err != nil {
 		return CombinedRunResult{}, err
 	}
+	if err := ensureBreakoutStockTable(ctx, r.db); err != nil {
+		return CombinedRunResult{}, err
+	}
 
 	stocks, err := LoadYahooSupportedStocks(ctx, r.db)
 	if err != nil {
@@ -258,8 +415,9 @@ func (r *VolumeRunner) RunAllDays(ctx context.Context, days int) (CombinedRunRes
 
 	period1, period2 := yahooPeriods(time.Now(), days)
 	result := CombinedRunResult{
-		Volume: RunResult{TotalStocks: len(stocks)},
-		Shadow: RunResult{TotalStocks: len(stocks)},
+		Volume:   RunResult{TotalStocks: len(stocks)},
+		Shadow:   RunResult{TotalStocks: len(stocks)},
+		Breakout: RunResult{TotalStocks: len(stocks)},
 	}
 	for index, meta := range stocks {
 		if index > 0 {
@@ -270,7 +428,9 @@ func (r *VolumeRunner) RunAllDays(ctx context.Context, days int) (CombinedRunRes
 		if err != nil {
 			result.Volume.Failed++
 			result.Shadow.Failed++
+			result.Breakout.Failed++
 			log.Printf("[stock-pool] fetch failed stock_code=%s stock_name=%s err=%v", meta.StockCode, meta.StockName, err)
+			logCombinedRunProgress("stock-pool", index+1, len(stocks), meta, result)
 			continue
 		}
 
@@ -289,6 +449,15 @@ func (r *VolumeRunner) RunAllDays(ctx context.Context, days int) (CombinedRunRes
 		} else {
 			r.insertShadowStocks(ctx, shadows, &result.Shadow)
 		}
+
+		breakouts, err := buildBreakoutStocks(meta, quote, timestamps, days)
+		if err != nil {
+			result.Breakout.Failed++
+			log.Printf("[breakout] build failed stock_code=%s stock_name=%s err=%v", meta.StockCode, meta.StockName, err)
+		} else {
+			r.insertBreakoutStocks(ctx, breakouts, &result.Breakout)
+		}
+		logCombinedRunProgress("stock-pool", index+1, len(stocks), meta, result)
 	}
 	return result, nil
 }
@@ -474,15 +643,79 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started"})
 	})
+	mux.HandleFunc("/stock-pool/run", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost && req.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.IsRunning() {
+			http.Error(w, "stock pool job is already running", http.StatusConflict)
+			return
+		}
+		days, err := parseRunDays(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			result, err := r.RunAllDays(ctx, days)
+			if err != nil {
+				log.Printf("[stock-pool] async run failed: %v", err)
+				return
+			}
+			log.Printf("[stock-pool] async run done days=%d result=%+v", days, result)
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started", "days": days})
+	})
+	mux.HandleFunc("/breakout/run", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost && req.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.IsRunning() {
+			http.Error(w, "stock pool job is already running", http.StatusConflict)
+			return
+		}
+		days, err := parseRunDays(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.Printf("[breakout] run request accepted method=%s path=%s remote=%s days=%d", req.Method, req.URL.String(), req.RemoteAddr, days)
+		go func() {
+			log.Printf("[breakout] async run started days=%d", days)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			result, err := r.RunBreakoutDays(ctx, days)
+			if err != nil {
+				log.Printf("[breakout] async run failed: %v", err)
+				return
+			}
+			log.Printf("[breakout] async run done days=%d result=%+v", days, result)
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started", "days": days})
+	})
 	mux.HandleFunc("/api/volume-stocks", r.handleVolumeStocks)
 	mux.HandleFunc("/api/shadow-stocks", r.handleShadowStocks)
+	mux.HandleFunc("/api/breakout-stocks", r.handleBreakoutStocks)
+	mux.HandleFunc("/api/stock-pool/export", r.handleExportStockPool)
+	mux.HandleFunc("/api/macro-market", r.handleMacroMarket)
+	mux.HandleFunc("/api/macro-market/preview", r.handleMacroMarketPreview)
+	mux.HandleFunc("/api/macro-market/run", r.handleMacroMarketPreview)
 	mux.HandleFunc("/api/volume-stocks/delete", r.handleDeleteVolumeStocks)
 	mux.HandleFunc("/api/shadow-stocks/delete", r.handleDeleteShadowStocks)
+	mux.HandleFunc("/api/breakout-stocks/delete", r.handleDeleteBreakoutStocks)
 	mux.HandleFunc("/api/volume-stocks/start", r.handleUpdateVolumeStart)
 	mux.HandleFunc("/api/shadow-stocks/start", r.handleUpdateShadowStart)
+	mux.HandleFunc("/api/breakout-stocks/start", r.handleUpdateBreakoutStart)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	go r.scheduleDaily()
+	go r.scheduleMacroDaily()
 	log.Printf("[server] listen addr=%s", addr)
 	return http.ListenAndServe(addr, withWebLog(mux, webLogger))
 }
@@ -551,6 +784,81 @@ func (r *VolumeRunner) handleShadowStocks(w http.ResponseWriter, req *http.Reque
 	_ = json.NewEncoder(w).Encode(page)
 }
 
+func (r *VolumeRunner) handleBreakoutStocks(w http.ResponseWriter, req *http.Request) {
+	page, err := queryStockPoolRows(req.Context(), r.db, req, "breakout_stock")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(page)
+}
+
+func (r *VolumeRunner) handleExportStockPool(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	pool := req.URL.Query().Get("pool")
+	table, err := stockPoolTableByName(pool)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	page, err := queryStockPoolRows(req.Context(), r.db, req, table)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	markdown := buildStockPoolExportMarkdown(pool, req, page.Rows)
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	_, _ = w.Write([]byte(markdown))
+}
+
+func (r *VolumeRunner) handleMacroMarketPreview(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet && req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	days, err := parseRunDays(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Minute)
+	defer cancel()
+	result, err := r.RunMacroMarketDays(ctx, days)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (r *VolumeRunner) handleMacroMarket(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 60
+	if value := req.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 || parsed > 120 {
+			http.Error(w, "limit must be between 1 and 120", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	page, err := queryMacroMarketPage(req.Context(), r.db, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(page)
+}
+
 func (r *VolumeRunner) handleDeleteVolumeStocks(w http.ResponseWriter, req *http.Request) {
 	r.handleDeleteStockPoolRows(w, req, "volume_stock")
 }
@@ -559,12 +867,20 @@ func (r *VolumeRunner) handleDeleteShadowStocks(w http.ResponseWriter, req *http
 	r.handleDeleteStockPoolRows(w, req, "shadow_stock")
 }
 
+func (r *VolumeRunner) handleDeleteBreakoutStocks(w http.ResponseWriter, req *http.Request) {
+	r.handleDeleteStockPoolRows(w, req, "breakout_stock")
+}
+
 func (r *VolumeRunner) handleUpdateVolumeStart(w http.ResponseWriter, req *http.Request) {
 	r.handleUpdateStockPoolStart(w, req, "volume_stock")
 }
 
 func (r *VolumeRunner) handleUpdateShadowStart(w http.ResponseWriter, req *http.Request) {
 	r.handleUpdateStockPoolStart(w, req, "shadow_stock")
+}
+
+func (r *VolumeRunner) handleUpdateBreakoutStart(w http.ResponseWriter, req *http.Request) {
+	r.handleUpdateStockPoolStart(w, req, "breakout_stock")
 }
 
 func (r *VolumeRunner) handleUpdateStockPoolStart(w http.ResponseWriter, req *http.Request, table string) {
@@ -611,8 +927,179 @@ func QueryVolumeStocks(ctx context.Context, db *sql.DB, req *http.Request) (Stoc
 	return queryStockPoolRows(ctx, db, req, "volume_stock")
 }
 
+func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeStockRow) string {
+	var builder strings.Builder
+	title := stockPoolTitle(pool)
+	query := req.URL.Query()
+	fmt.Fprintf(&builder, "# %s基本面初筛\n\n", title)
+	builder.WriteString("下面是我的 A 股技术形态股票池，请你只做基本面和事件风险初筛，不要给买卖建议。\n\n")
+	builder.WriteString("请从主营业务、业绩稳定性、估值水平、行业景气度、公告风险、解禁减持风险、财务质量、技术形态与基本面匹配度几个角度分析。\n")
+	builder.WriteString("最后请给出三个等级之一：优先研究、谨慎观察、直接排除，并列出需要人工确认的问题。\n\n")
+	builder.WriteString("## 筛选条件\n\n")
+	fmt.Fprintf(&builder, "- 股票池：%s\n", title)
+	fmt.Fprintf(&builder, "- 开始日期：%s\n", valueOrDash(query.Get("start")))
+	fmt.Fprintf(&builder, "- 结束日期：%s\n", valueOrDash(query.Get("end")))
+	fmt.Fprintf(&builder, "- 最小成交额：%s\n", amountFilterLabel(query.Get("min_amount")))
+	fmt.Fprintf(&builder, "- 最大成交额：%s\n", amountFilterLabel(query.Get("max_amount")))
+	fmt.Fprintf(&builder, "- 只看标星：%s\n", yesNo(query.Get("starred") == "1"))
+	fmt.Fprintf(&builder, "- 当前导出数量：%d\n\n", len(rows))
+	builder.WriteString("## 输出格式要求\n\n")
+	builder.WriteString("请用表格输出：股票代码、名称、行业、入池原因、基本面摘要、主要风险、评级、需要人工确认的问题。\n\n")
+	builder.WriteString("## 股票列表\n\n")
+	if len(rows) == 0 {
+		builder.WriteString("当前筛选条件下没有股票。\n")
+		return builder.String()
+	}
+	for index, row := range rows {
+		fmt.Fprintf(&builder, "### %d. %s %s\n\n", index+1, row.StockCode, row.StockName)
+		fmt.Fprintf(&builder, "- 股票池：%s\n", title)
+		fmt.Fprintf(&builder, "- 行业：%s\n", valueOrDash(row.SectorName))
+		fmt.Fprintf(&builder, "- 入池时间：%s\n", valueOrDash(row.GmtCreate))
+		fmt.Fprintf(&builder, "- 雪球链接：%s\n", xueqiuURL(row.StockCode))
+		fmt.Fprintf(&builder, "- 收盘价：%.2f\n", row.ClosePrice)
+		fmt.Fprintf(&builder, "- 最高价：%.2f\n", row.MaxPrice)
+		fmt.Fprintf(&builder, "- 最低价：%.2f\n", row.MinPrice)
+		fmt.Fprintf(&builder, "- %s：%.2f%%\n", riseLabel(pool), row.Rise)
+		fmt.Fprintf(&builder, "- 成交额：%.2f 亿\n", row.Amount/100000000)
+		fmt.Fprintf(&builder, "- %s：%.2f%s\n", metricLabel(pool), row.Vol, metricSuffix(pool))
+		if pool == "breakout" {
+			fmt.Fprintf(&builder, "- 前高价：%.2f\n", row.BeforeMaxPrice)
+			fmt.Fprintf(&builder, "- 前高日成交量：%.0f\n", row.BeforeMaxVol)
+			fmt.Fprintf(&builder, "- 前高日期：%s\n", dateOnlyString(row.BeforeMaxTime))
+		}
+		if pool == "shadow" {
+			fmt.Fprintf(&builder, "- 首次覆盖价：%s\n", priceOrDash(row.FirstCoverPrice))
+			fmt.Fprintf(&builder, "- 首次覆盖时间：%s\n", dateOnlyString(row.FirstCoverTime))
+			fmt.Fprintf(&builder, "- 最新覆盖价：%s\n", priceOrDash(row.NowCoverPrice))
+			fmt.Fprintf(&builder, "- 最新覆盖时间：%s\n", dateOnlyString(row.NowCoverTime))
+		}
+		fmt.Fprintf(&builder, "- 入池原因：%s\n\n", stockPoolReason(pool))
+	}
+	return builder.String()
+}
+
+func stockPoolTitle(pool string) string {
+	switch pool {
+	case "volume":
+		return "放量股票池"
+	case "shadow":
+		return "上影线试盘池"
+	case "breakout":
+		return "突破股票池"
+	default:
+		return "股票池"
+	}
+}
+
+func stockPoolReason(pool string) string {
+	switch pool {
+	case "volume":
+		return "当日上涨，成交量超过前一日三倍，并且超过近十日均量两倍，成交额满足流动性要求。"
+	case "shadow":
+		return "当日上涨且收阳，盘中最高价涨幅超过阈值，最高价突破近二十二日收盘压力，同时上影线长度大于阳线实体。"
+	case "breakout":
+		return "近三日高点递增，最新收盘上涨并接近或小幅突破前高，成交量不明显超过前高日，且均线结构多头排列。"
+	default:
+		return "满足当前股票池筛选规则。"
+	}
+}
+
+func riseLabel(pool string) string {
+	if pool == "shadow" {
+		return "收盘涨幅"
+	}
+	return "涨跌幅"
+}
+
+func metricLabel(pool string) string {
+	switch pool {
+	case "volume":
+		return "量比"
+	case "shadow":
+		return "最高价涨幅"
+	case "breakout":
+		return "量能接近度"
+	default:
+		return "指标"
+	}
+}
+
+func metricSuffix(pool string) string {
+	if pool == "shadow" {
+		return "%"
+	}
+	return ""
+}
+
+func valueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "是"
+	}
+	return "否"
+}
+
+func amountFilterLabel(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "不限"
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return value
+	}
+	return fmt.Sprintf("%.2f 亿", parsed/100000000)
+}
+
+func priceOrDash(value float64) string {
+	if value <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", value)
+}
+
+func dateOnlyString(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	if len(value) >= 10 {
+		return value[:10]
+	}
+	return value
+}
+
+func xueqiuURL(stockCode string) string {
+	prefix := "SZ"
+	if strings.HasPrefix(stockCode, "6") {
+		prefix = "SH"
+	}
+	return fmt.Sprintf("https://xueqiu.com/S/%s%s", prefix, stockCode)
+}
+
+func isStockPoolTable(table string) bool {
+	return table == "volume_stock" || table == "shadow_stock" || table == "breakout_stock"
+}
+
+func stockPoolTableByName(pool string) (string, error) {
+	switch pool {
+	case "volume":
+		return "volume_stock", nil
+	case "shadow":
+		return "shadow_stock", nil
+	case "breakout":
+		return "breakout_stock", nil
+	default:
+		return "", fmt.Errorf("invalid stock pool")
+	}
+}
+
 func DeleteStockPoolRows(ctx context.Context, db *sql.DB, table string, ids []int64) (int64, error) {
-	if table != "volume_stock" && table != "shadow_stock" {
+	if !isStockPoolTable(table) {
 		return 0, fmt.Errorf("invalid stock pool table")
 	}
 	if len(ids) == 0 {
@@ -652,7 +1139,7 @@ func DeleteStockPoolRows(ctx context.Context, db *sql.DB, table string, ids []in
 }
 
 func UpdateStockPoolStart(ctx context.Context, db *sql.DB, table string, id int64, start int) error {
-	if table != "volume_stock" && table != "shadow_stock" {
+	if !isStockPoolTable(table) {
 		return fmt.Errorf("invalid stock pool table")
 	}
 	if err := ensureStockPoolTable(ctx, db, table); err != nil {
@@ -747,7 +1234,7 @@ WHERE id = ?
 }
 
 func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, table string) (StockPoolPage, error) {
-	if table != "volume_stock" && table != "shadow_stock" {
+	if !isStockPoolTable(table) {
 		return StockPoolPage{}, fmt.Errorf("invalid stock pool table")
 	}
 	if err := ensureStockPoolTable(ctx, db, table); err != nil {
@@ -828,16 +1315,18 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 
 	riseField, volField := rowMetricFields(table)
 	coverFields := rowCoverFields(table)
+	breakoutFields := rowBreakoutFields(table)
 	sqlText := fmt.Sprintf(`
 SELECT id, stock_code, stock_name, sector_id, COALESCE(sector_name, ''),
        COALESCE(close_price, 0), COALESCE(max_price, 0), COALESCE(min_price, 0),
        COALESCE(%s, 0), COALESCE(amount, 0), COALESCE(%s, 0), COALESCE(`+"`start`"+`, 0),
        %s,
+       %s,
        DATE_FORMAT(gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
 FROM %s
 %s
 ORDER BY %s %s
-LIMIT ? OFFSET ?`, riseField, volField, coverFields, table, where, sortField, sortDir)
+LIMIT ? OFFSET ?`, riseField, volField, breakoutFields, coverFields, table, where, sortField, sortDir)
 
 	resultRows, err := db.QueryContext(ctx, sqlText, args...)
 	if err != nil {
@@ -861,6 +1350,9 @@ LIMIT ? OFFSET ?`, riseField, volField, coverFields, table, where, sortField, so
 			&row.Amount,
 			&row.Vol,
 			&row.Start,
+			&row.BeforeMaxPrice,
+			&row.BeforeMaxVol,
+			&row.BeforeMaxTime,
 			&row.FirstCoverPrice,
 			&row.FirstCoverTime,
 			&row.NowCoverPrice,
@@ -884,9 +1376,16 @@ func rowCoverFields(table string) string {
 	return "0, '', 0, ''"
 }
 
+func rowBreakoutFields(table string) string {
+	if table == "breakout_stock" {
+		return "COALESCE(before_max_price, 0), COALESCE(before_max_vol, 0), COALESCE(DATE_FORMAT(before_max_time, '%Y-%m-%d %H:%i:%s'), '')"
+	}
+	return "0, 0, ''"
+}
+
 func rowMetricFields(table string) (string, string) {
 	if table == "shadow_stock" {
-		return "raise_rate", "shadow_rate"
+		return "raise_rate", "high_rate"
 	}
 	return "rise", "vol"
 }
@@ -914,9 +1413,24 @@ func allowedSortField(table string, field string) string {
 		return "amount"
 	case "vol":
 		if table == "shadow_stock" {
-			return "shadow_rate"
+			return "high_rate"
 		}
 		return "vol"
+	case "before_max_price":
+		if table == "breakout_stock" {
+			return "before_max_price"
+		}
+		return "gmt_create"
+	case "before_max_vol":
+		if table == "breakout_stock" {
+			return "before_max_vol"
+		}
+		return "gmt_create"
+	case "before_max_time":
+		if table == "breakout_stock" {
+			return "before_max_time"
+		}
+		return "gmt_create"
 	case "start":
 		return "`start`"
 	case "gmt_create":
@@ -943,7 +1457,7 @@ func (r *VolumeRunner) scheduleDaily() {
 			cancel()
 			continue
 		}
-		log.Printf("[schedule] stock pool run done: volume=%+v shadow=%+v", result.Volume, result.Shadow)
+		log.Printf("[schedule] stock pool run done: volume=%+v shadow=%+v breakout=%+v", result.Volume, result.Shadow, result.Breakout)
 
 		coverResult, err := r.RunShadowCover(ctx)
 		cancel()
@@ -955,13 +1469,34 @@ func (r *VolumeRunner) scheduleDaily() {
 	}
 }
 
+func (r *VolumeRunner) scheduleMacroDaily() {
+	for {
+		now := time.Now()
+		next := nextMacroRun(now)
+		wait := time.Until(next)
+		if wait <= 0 {
+			continue
+		}
+		log.Printf("[schedule] waiting next macro market run at %s wait=%s", next.Format(time.RFC3339), wait.Round(time.Second))
+		time.Sleep(wait)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		result, err := r.RunMacroMarketDays(ctx, 1)
+		cancel()
+		if err != nil {
+			log.Printf("[schedule] macro market run failed: %v", err)
+			continue
+		}
+		log.Printf("[schedule] macro market run done: target_date=%s inserted=%d updated=%d failed=%d rows=%d", result.TargetDate, result.Inserted, result.Updated, result.Failed, len(result.Rows))
+	}
+}
+
 func nextWeekdayRun(now time.Time) time.Time {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		location = time.FixedZone("Asia/Shanghai", 8*60*60)
 	}
 	localNow := now.In(location)
-	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 15, 1, 0, 0, location)
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 15, 10, 0, 0, location)
 	for !next.After(localNow) || next.Weekday() == time.Saturday || next.Weekday() == time.Sunday {
 		if !next.After(localNow) {
 			next = next.Add(24 * time.Hour)
@@ -974,12 +1509,25 @@ func nextWeekdayRun(now time.Time) time.Time {
 	return next
 }
 
+func nextMacroRun(now time.Time) time.Time {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		location = time.FixedZone("Asia/Shanghai", 8*60*60)
+	}
+	localNow := now.In(location)
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 0, 0, 0, location)
+	if !next.After(localNow) {
+		next = next.Add(24 * time.Hour)
+	}
+	return next
+}
+
 func yahooPeriods(now time.Time, days int) (int64, int64) {
 	period2 := now.Add(24 * time.Hour).Unix()
-	requiredTradingDays := days + 1
+	requiredTradingDays := days + 66
 	lookbackDays := requiredTradingDays*2 + 7
-	if lookbackDays < 30 {
-		lookbackDays = 30
+	if lookbackDays < 100 {
+		lookbackDays = 100
 	}
 	period1 := now.AddDate(0, 0, -lookbackDays).Unix()
 	return period1, period2
@@ -1038,7 +1586,7 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
   now_cover_time TIMESTAMP NULL DEFAULT NULL COMMENT '最新覆盖时间',
   raise_rate DECIMAL(10,4) DEFAULT NULL COMMENT '收盘涨幅',
   amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
-  shadow_rate DECIMAL(10,4) DEFAULT NULL COMMENT '上影率',
+  high_rate DECIMAL(10,4) DEFAULT NULL COMMENT '最高价涨幅',
   ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -1052,6 +1600,74 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
 	if err := ensureStockPoolStartColumn(ctx, db, "shadow_stock"); err != nil {
 		return err
 	}
+	if err := ensureShadowStockExtraColumns(ctx, db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureShadowStockExtraColumns(ctx context.Context, db *sql.DB) error {
+	if err := ensureTableColumn(ctx, db, "shadow_stock", "high_rate", "ALTER TABLE shadow_stock ADD COLUMN high_rate DECIMAL(10,4) DEFAULT NULL COMMENT '最高价涨幅'"); err != nil {
+		return err
+	}
+	hasShadowRate, err := tableColumnExists(ctx, db, "shadow_stock", "shadow_rate")
+	if err != nil {
+		return err
+	}
+	if hasShadowRate {
+		if _, err := db.ExecContext(ctx, "UPDATE shadow_stock SET high_rate = shadow_rate WHERE high_rate IS NULL"); err != nil {
+			return fmt.Errorf("copy shadow_stock.shadow_rate to high_rate failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureBreakoutStockTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS breakout_stock (
+  id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  stock_code VARCHAR(20) NOT NULL COMMENT '股票代码',
+  stock_name VARCHAR(100) NOT NULL COMMENT '股票名称',
+  sector_id BIGINT NOT NULL COMMENT '行业ID',
+  sector_name VARCHAR(100) DEFAULT NULL COMMENT '行业名称',
+  close_price DECIMAL(18,4) DEFAULT NULL COMMENT '收盘价',
+  max_price DECIMAL(18,4) DEFAULT NULL COMMENT '最高价',
+  min_price DECIMAL(18,4) DEFAULT NULL COMMENT '最低价',
+  before_max_price DECIMAL(18,4) DEFAULT NULL COMMENT '前高价',
+  before_max_vol DECIMAL(20,4) DEFAULT NULL COMMENT '前高日成交量',
+  before_max_time TIMESTAMP NULL DEFAULT NULL COMMENT '前高日期',
+  rise DECIMAL(10,4) DEFAULT NULL COMMENT '涨跌幅',
+  amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
+  vol DECIMAL(10,4) DEFAULT NULL COMMENT '今日成交量/前高日成交量',
+  ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
+  gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (id),
+  KEY idx_stock_code (stock_code),
+  KEY idx_sector_id (sector_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='突破股票池表'`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("ensure breakout_stock table failed: %w", err)
+	}
+	if err := ensureStockPoolStartColumn(ctx, db, "breakout_stock"); err != nil {
+		return err
+	}
+	if err := ensureBreakoutStockExtraColumns(ctx, db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureBreakoutStockExtraColumns(ctx context.Context, db *sql.DB) error {
+	if err := ensureTableColumn(ctx, db, "breakout_stock", "before_max_price", "ALTER TABLE breakout_stock ADD COLUMN before_max_price DECIMAL(18,4) DEFAULT NULL COMMENT '前高价'"); err != nil {
+		return err
+	}
+	if err := ensureTableColumn(ctx, db, "breakout_stock", "before_max_vol", "ALTER TABLE breakout_stock ADD COLUMN before_max_vol DECIMAL(20,4) DEFAULT NULL COMMENT '前高日成交量'"); err != nil {
+		return err
+	}
+	if err := ensureTableColumn(ctx, db, "breakout_stock", "before_max_time", "ALTER TABLE breakout_stock ADD COLUMN before_max_time TIMESTAMP NULL DEFAULT NULL COMMENT '前高日期'"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1061,33 +1677,46 @@ func ensureStockPoolTable(ctx context.Context, db *sql.DB, table string) error {
 		return ensureVolumeStockTable(ctx, db)
 	case "shadow_stock":
 		return ensureShadowStockTable(ctx, db)
+	case "breakout_stock":
+		return ensureBreakoutStockTable(ctx, db)
 	default:
 		return fmt.Errorf("invalid stock pool table")
 	}
 }
 
 func ensureStockPoolStartColumn(ctx context.Context, db *sql.DB, table string) error {
-	if table != "volume_stock" && table != "shadow_stock" {
+	if !isStockPoolTable(table) {
 		return fmt.Errorf("invalid stock pool table")
 	}
+	return ensureTableColumn(ctx, db, table, "start", fmt.Sprintf("ALTER TABLE %s ADD COLUMN `start` INT NOT NULL DEFAULT 0 COMMENT '是否标星'", table))
+}
+
+func ensureTableColumn(ctx context.Context, db *sql.DB, table string, column string, alterSQL string) error {
+	exists, err := tableColumnExists(ctx, db, table, column)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, alterSQL); err != nil {
+		return fmt.Errorf("add %s.%s column failed: %w", table, column, err)
+	}
+	return nil
+}
+
+func tableColumnExists(ctx context.Context, db *sql.DB, table string, column string) (bool, error) {
 	var exists int
 	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM information_schema.columns
 WHERE table_schema = DATABASE()
   AND table_name = ?
-  AND column_name = 'start'
-`, table).Scan(&exists); err != nil {
-		return fmt.Errorf("check %s start column failed: %w", table, err)
+  AND column_name = ?
+`, table, column).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check %s.%s column failed: %w", table, column, err)
 	}
-	if exists > 0 {
-		return nil
-	}
-	sqlText := fmt.Sprintf("ALTER TABLE %s ADD COLUMN `start` INT NOT NULL DEFAULT 0 COMMENT '是否标星'", table)
-	if _, err := db.ExecContext(ctx, sqlText); err != nil {
-		return fmt.Errorf("add %s start column failed: %w", table, err)
-	}
-	return nil
+	return exists > 0, nil
 }
 
 func InsertVolumeStock(ctx context.Context, db *sql.DB, stock VolumeStock) error {
@@ -1124,7 +1753,7 @@ func InsertShadowStock(ctx context.Context, db *sql.DB, stock ShadowStock) error
 		ctx,
 		`
 INSERT INTO shadow_stock
-  (stock_code, stock_name, sector_id, sector_name, close_price, max_price, min_price, raise_rate, amount, shadow_rate, gmt_create)
+  (stock_code, stock_name, sector_id, sector_name, close_price, max_price, min_price, raise_rate, amount, high_rate, gmt_create)
 VALUES
   (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
@@ -1142,6 +1771,36 @@ VALUES
 	)
 	if err != nil {
 		return fmt.Errorf("insert shadow_stock %s %s failed: %w", stock.StockCode, stock.StockName, err)
+	}
+	return nil
+}
+
+func InsertBreakoutStock(ctx context.Context, db *sql.DB, stock BreakoutStock) error {
+	_, err := db.ExecContext(
+		ctx,
+		`
+INSERT INTO breakout_stock
+  (stock_code, stock_name, sector_id, sector_name, close_price, max_price, min_price, before_max_price, before_max_vol, before_max_time, rise, amount, vol, gmt_create)
+VALUES
+  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+		stock.StockCode,
+		stock.StockName,
+		stock.SectorID,
+		stock.SectorName,
+		stock.ClosePrice,
+		stock.MaxPrice,
+		stock.MinPrice,
+		stock.BeforeMaxPrice,
+		stock.BeforeMaxVol,
+		stock.BeforeMaxTime,
+		stock.Rise,
+		stock.Amount,
+		stock.Vol,
+		stock.GmtCreate,
+	)
+	if err != nil {
+		return fmt.Errorf("insert breakout_stock %s %s failed: %w", stock.StockCode, stock.StockName, err)
 	}
 	return nil
 }

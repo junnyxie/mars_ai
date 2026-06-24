@@ -48,6 +48,23 @@ type ShadowStock struct {
 	GmtCreate  time.Time
 }
 
+type BreakoutStock struct {
+	StockCode      string
+	StockName      string
+	SectorID       int64
+	SectorName     sql.NullString
+	ClosePrice     float64
+	MaxPrice       float64
+	MinPrice       float64
+	Rise           float64
+	Amount         float64
+	Vol            float64
+	BeforeMaxPrice float64
+	BeforeMaxVol   float64
+	BeforeMaxTime  time.Time
+	GmtCreate      time.Time
+}
+
 const minPoolAmount = 500000000
 
 type chartResponse struct {
@@ -151,7 +168,7 @@ func FetchDailyVolumeStocks(ctx context.Context, client *http.Client, meta Stock
 }
 
 func buildVolumeStocks(meta StockMeta, quote dailyQuote, timestamps []int64, days int) ([]VolumeStock, error) {
-	indexes := latestCompleteIndexes(quote.Close, quote.High, quote.Low, quote.Volume, days)
+	indexes := latestCompleteIndexes(quote.Close, quote.High, quote.Low, quote.Volume, timestamps, days)
 	if len(indexes) == 0 {
 		return nil, fmt.Errorf("no complete daily quote found for %s", meta.StockCode)
 	}
@@ -184,6 +201,10 @@ func buildVolumeStocks(meta StockMeta, quote dailyQuote, timestamps []int64, day
 		if yesterdayClose != 0 {
 			rise = (closePrice - yesterdayClose) / yesterdayClose * 100
 		}
+		averageVolume10, ok := averagePreviousVolume(quote.Volume, todayIndex, 10)
+		if rise <= 0 || volumeRatio <= 3 || !ok || todayVolume < averageVolume10*2 {
+			continue
+		}
 
 		stocks = append(stocks, VolumeStock{
 			StockCode:  meta.StockCode,
@@ -211,7 +232,7 @@ func FetchDailyShadowStocks(ctx context.Context, client *http.Client, meta Stock
 }
 
 func buildShadowStocks(meta StockMeta, quote dailyQuote, timestamps []int64, days int) ([]ShadowStock, error) {
-	indexes := latestCompleteIndexes(quote.Close, quote.High, quote.Low, quote.Volume, days)
+	indexes := latestCompleteIndexes(quote.Close, quote.High, quote.Low, quote.Volume, timestamps, days)
 	if len(indexes) == 0 {
 		return nil, fmt.Errorf("no complete daily quote found for %s", meta.StockCode)
 	}
@@ -236,6 +257,9 @@ func buildShadowStocks(meta StockMeta, quote dailyQuote, timestamps []int64, day
 		}
 		maxPrice := *quote.High[todayIndex]
 		minPrice := *quote.Low[todayIndex]
+		if !higherThanPreviousCloses(quote.Close, todayIndex, maxPrice, 22) {
+			continue
+		}
 		todayVolume := float64(*quote.Volume[todayIndex])
 		if todayVolume < 200000 {
 			continue
@@ -266,6 +290,78 @@ func buildShadowStocks(meta StockMeta, quote dailyQuote, timestamps []int64, day
 			Amount:     round(amount, 4),
 			Vol:        round(highRise, 2),
 			GmtCreate:  quoteTime(timestamps, todayIndex),
+		})
+	}
+	return stocks, nil
+}
+
+func buildBreakoutStocks(meta StockMeta, quote dailyQuote, timestamps []int64, days int) ([]BreakoutStock, error) {
+	indexes := latestCompleteIndexes(quote.Close, quote.High, quote.Low, quote.Volume, timestamps, days)
+	if len(indexes) == 0 {
+		return nil, fmt.Errorf("no complete daily quote found for %s", meta.StockCode)
+	}
+
+	stocks := make([]BreakoutStock, 0, len(indexes))
+	for _, todayIndex := range indexes {
+		yesterdayIndex := previousCompleteIndex(quote.Close, quote.Volume, todayIndex)
+		if yesterdayIndex < 0 || !hasCompleteHighCloseVolume(quote, todayIndex) {
+			continue
+		}
+		if !recentThreeHighsRise(quote, todayIndex) {
+			continue
+		}
+		if !closeAboveMovingAverages(quote.Close, todayIndex) {
+			continue
+		}
+
+		closePrice := *quote.Close[todayIndex]
+		maxPrice := *quote.High[todayIndex]
+		minPrice := *quote.Low[todayIndex]
+		todayVolume := float64(*quote.Volume[todayIndex])
+		if todayVolume < 200000 {
+			continue
+		}
+		yesterdayClose := *quote.Close[yesterdayIndex]
+		if yesterdayClose == 0 || closePrice <= yesterdayClose {
+			continue
+		}
+		closeRise := (closePrice - yesterdayClose) / yesterdayClose * 100
+		if closeRise <= 0 {
+			continue
+		}
+		amount := todayVolume * closePrice
+		if amount < minPoolAmount {
+			continue
+		}
+
+		beforeMaxPrice, beforeMaxVol, beforeMaxTime, ok := previousBreakoutHigh(quote, timestamps, todayIndex, 3, 66)
+		if !ok || beforeMaxPrice == 0 || beforeMaxVol == 0 {
+			continue
+		}
+		priceDiff := (closePrice - beforeMaxPrice) / beforeMaxPrice
+		if priceDiff < -0.03 || priceDiff > 0.07 {
+			continue
+		}
+		volumeRatio := todayVolume / beforeMaxVol
+		if volumeRatio > 1.05 {
+			continue
+		}
+
+		stocks = append(stocks, BreakoutStock{
+			StockCode:      meta.StockCode,
+			StockName:      meta.StockName,
+			SectorID:       meta.SectorID,
+			SectorName:     meta.SectorName,
+			ClosePrice:     round(closePrice, 2),
+			MaxPrice:       round(maxPrice, 2),
+			MinPrice:       round(minPrice, 2),
+			Rise:           round(closeRise, 2),
+			Amount:         round(amount, 4),
+			Vol:            round(volumeRatio, 2),
+			BeforeMaxPrice: round(beforeMaxPrice, 2),
+			BeforeMaxVol:   round(beforeMaxVol, 4),
+			BeforeMaxTime:  beforeMaxTime,
+			GmtCreate:      quoteTime(timestamps, todayIndex),
 		})
 	}
 	return stocks, nil
@@ -354,6 +450,7 @@ func findFirstCoverClose(quote dailyQuote, timestamps []int64, start time.Time, 
 }
 
 func latestClose(quote dailyQuote, timestamps []int64) (float64, time.Time, bool) {
+	// Cover tracking intentionally uses the newest Yahoo close, including intraday data before market close.
 	maxLen := min(len(quote.Close), len(timestamps))
 	for i := maxLen - 1; i >= 0; i-- {
 		if quote.Close[i] == nil {
@@ -365,8 +462,9 @@ func latestClose(quote dailyQuote, timestamps []int64) (float64, time.Time, bool
 }
 
 func dateOnly(value time.Time) time.Time {
-	local := value.In(time.Local)
-	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+	location := marketLocation()
+	local := value.In(location)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
 }
 
 func CheckFirstStock(ctx context.Context, db *sql.DB) (VolumeStock, error) {
@@ -389,15 +487,34 @@ func latestCompleteIndex(closeValues []*float64, highValues []*float64, lowValue
 	return -1
 }
 
-func latestCompleteIndexes(closeValues []*float64, highValues []*float64, lowValues []*float64, volumeValues []*int64, limit int) []int {
+func latestCompleteIndexes(closeValues []*float64, highValues []*float64, lowValues []*float64, volumeValues []*int64, timestamps []int64, limit int) []int {
 	indexes := make([]int, 0, limit)
 	maxLen := min(len(closeValues), len(highValues), len(lowValues), len(volumeValues))
 	for i := maxLen - 1; i >= 0 && len(indexes) < limit; i-- {
-		if closeValues[i] != nil && highValues[i] != nil && lowValues[i] != nil && volumeValues[i] != nil {
+		if closeValues[i] != nil && highValues[i] != nil && lowValues[i] != nil && volumeValues[i] != nil && isFinishedTradeDay(timestamps, i, time.Now()) {
 			indexes = append(indexes, i)
 		}
 	}
 	return indexes
+}
+
+func isFinishedTradeDay(timestamps []int64, index int, now time.Time) bool {
+	location := marketLocation()
+	if index >= len(timestamps) {
+		return true
+	}
+	tradeTime := time.Unix(timestamps[index], 0).In(location)
+	tradeDate := time.Date(tradeTime.Year(), tradeTime.Month(), tradeTime.Day(), 0, 0, 0, 0, location)
+	localNow := now.In(location)
+	today := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, location)
+	if tradeDate.Before(today) {
+		return true
+	}
+	if tradeDate.After(today) {
+		return false
+	}
+	closeMoment := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 15, 0, 0, 0, location)
+	return !localNow.Before(closeMoment)
 }
 
 func previousCompleteIndex(closeValues []*float64, volumeValues []*int64, todayIndex int) int {
@@ -413,9 +530,137 @@ func previousCompleteIndex(closeValues []*float64, volumeValues []*int64, todayI
 	return -1
 }
 
+func higherThanPreviousCloses(closeValues []*float64, todayIndex int, price float64, lookback int) bool {
+	count := 0
+	for i := todayIndex - 1; i >= 0 && count < lookback; i-- {
+		if closeValues[i] == nil {
+			continue
+		}
+		count++
+		if price <= *closeValues[i] {
+			return false
+		}
+	}
+	return count == lookback
+}
+
+func averagePreviousVolume(volumeValues []*int64, todayIndex int, lookback int) (float64, bool) {
+	total := 0.0
+	count := 0
+	for i := todayIndex - 1; i >= 0 && count < lookback; i-- {
+		if volumeValues[i] == nil {
+			continue
+		}
+		total += float64(*volumeValues[i])
+		count++
+	}
+	if count != lookback {
+		return 0, false
+	}
+	return total / float64(count), true
+}
+
+func hasCompleteHighCloseVolume(quote dailyQuote, index int) bool {
+	return index >= 0 &&
+		index < len(quote.Close) &&
+		index < len(quote.High) &&
+		index < len(quote.Volume) &&
+		index < len(quote.Low) &&
+		quote.Close[index] != nil &&
+		quote.High[index] != nil &&
+		quote.Low[index] != nil &&
+		quote.Volume[index] != nil
+}
+
+func recentThreeHighsRise(quote dailyQuote, todayIndex int) bool {
+	if todayIndex < 2 {
+		return false
+	}
+	for i := todayIndex - 2; i <= todayIndex; i++ {
+		if !hasCompleteHighCloseVolume(quote, i) {
+			return false
+		}
+	}
+	return *quote.High[todayIndex-2] < *quote.High[todayIndex-1] &&
+		*quote.High[todayIndex-1] < *quote.High[todayIndex] &&
+		*quote.Close[todayIndex] > *quote.Close[todayIndex-1]
+}
+
+func closeAboveMovingAverages(closeValues []*float64, todayIndex int) bool {
+	if todayIndex >= len(closeValues) || closeValues[todayIndex] == nil {
+		return false
+	}
+	ma5, ok := movingAverage(closeValues, todayIndex, 5)
+	if !ok {
+		return false
+	}
+	ma10, ok := movingAverage(closeValues, todayIndex, 10)
+	if !ok {
+		return false
+	}
+	ma20, ok := movingAverage(closeValues, todayIndex, 20)
+	if !ok {
+		return false
+	}
+	closePrice := *closeValues[todayIndex]
+	return closePrice > ma5 && ma5 > ma10 && ma10 > ma20
+}
+
+func movingAverage(closeValues []*float64, todayIndex int, lookback int) (float64, bool) {
+	total := 0.0
+	count := 0
+	for i := todayIndex; i >= 0 && count < lookback; i-- {
+		if closeValues[i] == nil {
+			continue
+		}
+		total += *closeValues[i]
+		count++
+	}
+	if count != lookback {
+		return 0, false
+	}
+	return total / float64(count), true
+}
+
+func previousBreakoutHigh(quote dailyQuote, timestamps []int64, todayIndex int, excludeRecent int, windowSize int) (float64, float64, time.Time, bool) {
+	start := todayIndex - windowSize + 1
+	if start < 0 {
+		return 0, 0, time.Time{}, false
+	}
+	end := todayIndex - excludeRecent + 1
+	if end-start <= 3 {
+		return 0, 0, time.Time{}, false
+	}
+
+	maxIndex := -1
+	maxPrice := 0.0
+	for i := start; i < end; i++ {
+		if !hasCompleteHighCloseVolume(quote, i) {
+			continue
+		}
+		if maxIndex < 0 || *quote.High[i] >= maxPrice {
+			maxIndex = i
+			maxPrice = *quote.High[i]
+		}
+	}
+	if maxIndex < start+3 || maxIndex < 0 || quote.Volume[maxIndex] == nil {
+		return 0, 0, time.Time{}, false
+	}
+	return maxPrice, float64(*quote.Volume[maxIndex]), quoteTime(timestamps, maxIndex), true
+}
+
 func closeTime(value time.Time) time.Time {
-	local := value.In(time.Local)
-	return time.Date(local.Year(), local.Month(), local.Day(), 15, 0, 0, 0, time.Local)
+	location := marketLocation()
+	local := value.In(location)
+	return time.Date(local.Year(), local.Month(), local.Day(), 15, 0, 0, 0, location)
+}
+
+func marketLocation() *time.Location {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("Asia/Shanghai", 8*60*60)
+	}
+	return location
 }
 
 func isSTStockName(name string) bool {
