@@ -323,6 +323,13 @@ button:disabled {
   outline-offset: 2px;
 }
 
+.macro-selected-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .macro-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

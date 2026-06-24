@@ -43,9 +43,8 @@ type MacroMarketPreview struct {
 }
 
 type MacroMarketPage struct {
-	Latest  MacroMarketSnapshot          `json:"latest"`
-	History []MacroMarketScore           `json:"history"`
-	Details map[string][]MacroMarketItem `json:"details,omitempty"`
+	Latest  MacroMarketSnapshot `json:"latest"`
+	History []MacroMarketScore  `json:"history"`
 }
 
 type MacroMarketSnapshot struct {
@@ -641,21 +640,15 @@ func queryMacroMarketPage(ctx context.Context, db *sql.DB, limit int) (MacroMark
 	if err != nil {
 		return MacroMarketPage{}, err
 	}
-	page := MacroMarketPage{
-		History: history,
-		Details: make(map[string][]MacroMarketItem, len(history)),
-	}
+	page := MacroMarketPage{History: history}
 	if len(history) == 0 {
 		return page, nil
 	}
-	for _, item := range history {
-		rows, err := queryMacroMarketRows(ctx, db, item.TradeDate)
-		if err != nil {
-			return MacroMarketPage{}, err
-		}
-		page.Details[item.TradeDate] = rows
-	}
 	latestDate := history[0].TradeDate
+	rows, err := queryMacroMarketRows(ctx, db, latestDate)
+	if err != nil {
+		return MacroMarketPage{}, err
+	}
 	page.Latest = MacroMarketSnapshot{
 		TradeDate:      latestDate,
 		RiskScore:      history[0].RiskScore,
@@ -665,9 +658,40 @@ func queryMacroMarketPage(ctx context.Context, db *sql.DB, limit int) (MacroMark
 		MarketLevel:    history[0].MarketLevel,
 		MarketStatus:   history[0].MarketStatus,
 		Summary:        history[0].Summary,
-		Rows:           page.Details[latestDate],
+		Rows:           rows,
 	}
 	return page, nil
+}
+
+func queryMacroMarketSnapshot(ctx context.Context, db *sql.DB, tradeDate string) (MacroMarketSnapshot, error) {
+	if tradeDate == "" {
+		return MacroMarketSnapshot{}, fmt.Errorf("date is required")
+	}
+	if _, err := time.Parse("2006-01-02", tradeDate); err != nil {
+		return MacroMarketSnapshot{}, fmt.Errorf("date must be YYYY-MM-DD")
+	}
+	if err := ensureMacroMarketDailyTable(ctx, db); err != nil {
+		return MacroMarketSnapshot{}, err
+	}
+	rows, err := queryMacroMarketRows(ctx, db, tradeDate)
+	if err != nil {
+		return MacroMarketSnapshot{}, err
+	}
+	if len(rows) == 0 {
+		return MacroMarketSnapshot{}, sql.ErrNoRows
+	}
+	first := rows[0]
+	return MacroMarketSnapshot{
+		TradeDate:      tradeDate,
+		RiskScore:      first.RiskScore,
+		CommodityScore: first.CommodityScore,
+		LiquidityScore: first.LiquidityScore,
+		TotalScore:     first.TotalScore,
+		MarketLevel:    first.MarketLevel,
+		MarketStatus:   first.MarketStatus,
+		Summary:        first.Summary,
+		Rows:           rows,
+	}, nil
 }
 
 func queryMacroMarketHistory(ctx context.Context, db *sql.DB, limit int) ([]MacroMarketScore, error) {

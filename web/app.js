@@ -30,6 +30,7 @@ const macroRiskEl = document.querySelector("#macroRisk");
 const macroCommodityEl = document.querySelector("#macroCommodity");
 const macroLiquidityEl = document.querySelector("#macroLiquidity");
 const macroChartEl = document.querySelector("#macroChart");
+const macroSelectedHintEl = document.querySelector("#macroSelectedHint");
 const macroRowsEl = document.querySelector("#macroRows");
 const macroSummaryEl = document.querySelector("#macroSummary");
 
@@ -509,6 +510,7 @@ async function loadMacroMarket() {
       macroCommodityEl.textContent = "-";
       macroLiquidityEl.textContent = "-";
       macroChartEl.innerHTML = `<div class="macro-empty">${err.message}</div>`;
+      macroSelectedHintEl.textContent = "-";
       macroRowsEl.innerHTML = "";
       macroSummaryEl.textContent = "-";
     }
@@ -525,12 +527,16 @@ function renderMacroMarket(data) {
     macroCommodityEl.textContent = "-";
     macroLiquidityEl.textContent = "-";
     macroChartEl.innerHTML = `<div class="macro-empty">暂无历史评分，请先调用 /api/macro-market/run?days=1</div>`;
+    macroSelectedHintEl.textContent = "-";
     macroRowsEl.innerHTML = "";
     macroSummaryEl.textContent = "-";
     return;
   }
   const history = (data.history || []).slice().reverse().slice(-60);
-  const details = data.details || {};
+  const details = {};
+  if (latest.trade_date) {
+    details[latest.trade_date] = latest.rows || [];
+  }
   const renderSnapshot = item => {
     const rows = details[item.trade_date] || item.rows || [];
     macroDateEl.textContent = item.trade_date || "-";
@@ -540,6 +546,7 @@ function renderMacroMarket(data) {
     macroCommodityEl.textContent = item.commodity_score ?? "-";
     macroLiquidityEl.textContent = item.liquidity_score ?? "-";
     macroScoreEl.className = `macro-level-${item.market_level || 0}`;
+    macroSelectedHintEl.textContent = `当前：${item.trade_date || "-"} · ${item.market_status || "-"} · ${formatNumber(item.total_score, 2)}`;
     macroSummaryEl.textContent = item.summary || "-";
     macroRowsEl.innerHTML = rows.map(row => `
       <div class="macro-item">
@@ -558,18 +565,33 @@ function renderMacroMarket(data) {
     macroChartEl.innerHTML = `
       <div class="macro-heatmap">
         ${history.map(item => `
-          <button class="macro-cell ${item.trade_date === latest.trade_date ? "active" : ""} macro-level-${item.market_level || 0}" type="button" data-date="${item.trade_date}" title="${item.trade_date} ${formatNumber(item.total_score, 2)} ${item.market_status || ""}">
+          <button class="macro-cell ${item.trade_date === latest.trade_date ? "active" : ""} macro-level-${item.market_level || 0}" type="button" data-date="${item.trade_date}" title="${item.trade_date} ${formatNumber(item.total_score, 2)} ${item.market_status || ""}" aria-label="${item.trade_date} ${formatNumber(item.total_score, 2)} ${item.market_status || ""}">
           </button>
         `).join("")}
       </div>
     `;
     macroChartEl.querySelectorAll(".macro-cell").forEach(cell => {
-      cell.addEventListener("click", () => {
+      cell.addEventListener("click", async () => {
         const item = history.find(historyItem => historyItem.trade_date === cell.dataset.date);
         if (!item) return;
         macroChartEl.querySelectorAll(".macro-cell").forEach(node => node.classList.remove("active"));
         cell.classList.add("active");
-        renderSnapshot(item);
+        if (details[item.trade_date]) {
+          renderSnapshot(item);
+          return;
+        }
+        const previousHint = macroSelectedHintEl.textContent;
+        macroSelectedHintEl.textContent = `加载中：${item.trade_date}`;
+        try {
+          const res = await fetch(`/api/macro-market/day?date=${encodeURIComponent(item.trade_date)}`);
+          if (!res.ok) throw new Error(await res.text());
+          const snapshot = await res.json();
+          details[item.trade_date] = snapshot.rows || [];
+          renderSnapshot(snapshot);
+        } catch (err) {
+          macroSelectedHintEl.textContent = previousHint;
+          setStatus(err.message);
+        }
       });
     });
   }

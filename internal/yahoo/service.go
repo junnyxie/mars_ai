@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -703,6 +704,7 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	mux.HandleFunc("/api/shadow-stocks", r.handleShadowStocks)
 	mux.HandleFunc("/api/breakout-stocks", r.handleBreakoutStocks)
 	mux.HandleFunc("/api/stock-pool/export", r.handleExportStockPool)
+	mux.HandleFunc("/api/macro-market/day", r.handleMacroMarketDay)
 	mux.HandleFunc("/api/macro-market", r.handleMacroMarket)
 	mux.HandleFunc("/api/macro-market/preview", r.handleMacroMarketPreview)
 	mux.HandleFunc("/api/macro-market/run", r.handleMacroMarketPreview)
@@ -857,6 +859,25 @@ func (r *VolumeRunner) handleMacroMarket(w http.ResponseWriter, req *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(page)
+}
+
+func (r *VolumeRunner) handleMacroMarketDay(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tradeDate := req.URL.Query().Get("date")
+	snapshot, err := queryMacroMarketSnapshot(req.Context(), r.db, tradeDate)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "macro market date not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snapshot)
 }
 
 func (r *VolumeRunner) handleDeleteVolumeStocks(w http.ResponseWriter, req *http.Request) {
