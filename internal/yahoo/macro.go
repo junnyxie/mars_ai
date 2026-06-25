@@ -104,7 +104,7 @@ func FetchMacroMarketDays(ctx context.Context, client *http.Client, now time.Tim
 	}
 	targetDate := macroTargetDate(now)
 	result := MacroMarketPreview{
-		Rule:       "Asia/Shanghai 08:00 后取前一天数据，08:00 前取前两天数据",
+		Rule:       "Asia/Shanghai 06:00 后取前一天数据，06:00 前取前两天数据",
 		TargetDate: targetDate.Format("2006-01-02"),
 		Days:       days,
 		Rows:       make([]MacroMarketItem, 0, len(macroMarketSymbols)),
@@ -131,8 +131,8 @@ func macroTargetDate(now time.Time) time.Time {
 	location := marketLocation()
 	localNow := now.In(location)
 	target := localNow.AddDate(0, 0, -1)
-	eightAM := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 0, 0, 0, location)
-	if localNow.Before(eightAM) {
+	sixAM := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 6, 0, 0, 0, location)
+	if localNow.Before(sixAM) {
 		target = localNow.AddDate(0, 0, -2)
 	}
 	return dateOnly(target)

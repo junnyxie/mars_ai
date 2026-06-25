@@ -56,6 +56,7 @@ type VolumeStockRow struct {
 	Amount          float64 `json:"amount"`
 	Vol             float64 `json:"vol"`
 	Start           int     `json:"start"`
+	GPTStar         int     `json:"gpt_star"`
 	BeforeMaxPrice  float64 `json:"before_max_price"`
 	BeforeMaxVol    float64 `json:"before_max_vol"`
 	BeforeMaxTime   string  `json:"before_max_time"`
@@ -96,6 +97,11 @@ type deleteStockPoolRowsResponse struct {
 type updateStockPoolStartRequest struct {
 	ID    int64 `json:"id"`
 	Start int   `json:"start"`
+}
+
+type updateStockPoolGPTStarRequest struct {
+	ID      int64 `json:"id"`
+	GPTStar int   `json:"gpt_star"`
 }
 
 func NewVolumeRunner(db *sql.DB) *VolumeRunner {
@@ -714,6 +720,9 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	mux.HandleFunc("/api/volume-stocks/start", r.handleUpdateVolumeStart)
 	mux.HandleFunc("/api/shadow-stocks/start", r.handleUpdateShadowStart)
 	mux.HandleFunc("/api/breakout-stocks/start", r.handleUpdateBreakoutStart)
+	mux.HandleFunc("/api/volume-stocks/gpt-star", r.handleUpdateVolumeGPTStar)
+	mux.HandleFunc("/api/shadow-stocks/gpt-star", r.handleUpdateShadowGPTStar)
+	mux.HandleFunc("/api/breakout-stocks/gpt-star", r.handleUpdateBreakoutGPTStar)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	go r.scheduleDaily()
@@ -904,6 +913,18 @@ func (r *VolumeRunner) handleUpdateBreakoutStart(w http.ResponseWriter, req *htt
 	r.handleUpdateStockPoolStart(w, req, "breakout_stock")
 }
 
+func (r *VolumeRunner) handleUpdateVolumeGPTStar(w http.ResponseWriter, req *http.Request) {
+	r.handleUpdateStockPoolGPTStar(w, req, "volume_stock")
+}
+
+func (r *VolumeRunner) handleUpdateShadowGPTStar(w http.ResponseWriter, req *http.Request) {
+	r.handleUpdateStockPoolGPTStar(w, req, "shadow_stock")
+}
+
+func (r *VolumeRunner) handleUpdateBreakoutGPTStar(w http.ResponseWriter, req *http.Request) {
+	r.handleUpdateStockPoolGPTStar(w, req, "breakout_stock")
+}
+
 func (r *VolumeRunner) handleUpdateStockPoolStart(w http.ResponseWriter, req *http.Request, table string) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -923,6 +944,27 @@ func (r *VolumeRunner) handleUpdateStockPoolStart(w http.ResponseWriter, req *ht
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": payload.ID, "start": payload.Start})
+}
+
+func (r *VolumeRunner) handleUpdateStockPoolGPTStar(w http.ResponseWriter, req *http.Request, table string) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload updateStockPoolGPTStarRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if payload.GPTStar != 0 {
+		payload.GPTStar = 1
+	}
+	if err := UpdateStockPoolGPTStar(req.Context(), r.db, table, payload.ID, payload.GPTStar); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": payload.ID, "gpt_star": payload.GPTStar})
 }
 
 func (r *VolumeRunner) handleDeleteStockPoolRows(w http.ResponseWriter, req *http.Request, table string) {
@@ -963,9 +1005,11 @@ func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeS
 	fmt.Fprintf(&builder, "- 最小成交额：%s\n", amountFilterLabel(query.Get("min_amount")))
 	fmt.Fprintf(&builder, "- 最大成交额：%s\n", amountFilterLabel(query.Get("max_amount")))
 	fmt.Fprintf(&builder, "- 只看标星：%s\n", yesNo(query.Get("starred") == "1"))
+	fmt.Fprintf(&builder, "- 只看GPT星：%s\n", yesNo(query.Get("gpt_starred") == "1"))
 	fmt.Fprintf(&builder, "- 当前导出数量：%d\n\n", len(rows))
 	builder.WriteString("## 输出格式要求\n\n")
-	builder.WriteString("请用表格输出：股票代码、名称、行业、入池原因、基本面摘要、主要风险、评级、需要人工确认的问题。\n\n")
+	builder.WriteString("请用表格输出：股票代码、名称、行业、入池原因、基本面摘要、主要风险、评级、是否建议GPT星标、需要人工确认的问题。\n")
+	builder.WriteString("如果评级为优先研究，请在“是否建议GPT星标”列填“是”，否则填“否”。\n\n")
 	builder.WriteString("## 股票列表\n\n")
 	if len(rows) == 0 {
 		builder.WriteString("当前筛选条件下没有股票。\n")
@@ -976,6 +1020,7 @@ func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeS
 		fmt.Fprintf(&builder, "- 股票池：%s\n", title)
 		fmt.Fprintf(&builder, "- 行业：%s\n", valueOrDash(row.SectorName))
 		fmt.Fprintf(&builder, "- 入池时间：%s\n", valueOrDash(row.GmtCreate))
+		fmt.Fprintf(&builder, "- 当前GPT星：%s\n", yesNo(row.GPTStar == 1))
 		fmt.Fprintf(&builder, "- 雪球链接：%s\n", xueqiuURL(row.StockCode))
 		fmt.Fprintf(&builder, "- 收盘价：%.2f\n", row.ClosePrice)
 		fmt.Fprintf(&builder, "- 最高价：%.2f\n", row.MaxPrice)
@@ -1187,6 +1232,34 @@ func UpdateStockPoolStart(ctx context.Context, db *sql.DB, table string, id int6
 	return nil
 }
 
+func UpdateStockPoolGPTStar(ctx context.Context, db *sql.DB, table string, id int64, gptStar int) error {
+	if !isStockPoolTable(table) {
+		return fmt.Errorf("invalid stock pool table")
+	}
+	if err := ensureStockPoolTable(ctx, db, table); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("invalid id")
+	}
+	if gptStar != 0 {
+		gptStar = 1
+	}
+	sqlText := fmt.Sprintf("UPDATE %s SET gpt_star = ? WHERE id = ?", table)
+	result, err := db.ExecContext(ctx, sqlText, gptStar, id)
+	if err != nil {
+		return fmt.Errorf("update %s gpt_star failed: %w", table, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read updated rows failed: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("row not found")
+	}
+	return nil
+}
+
 func LoadShadowCoverRows(ctx context.Context, db *sql.DB) ([]ShadowCoverRow, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT ss.id, ss.stock_code, ss.stock_name, COALESCE(s.region, ''),
@@ -1268,6 +1341,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	maxAmount := query.Get("max_amount")
 	coverBelow := query.Get("cover_below")
 	starred := query.Get("starred")
+	gptStarred := query.Get("gpt_starred")
 	sortField := allowedSortField(table, query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -1325,6 +1399,9 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	if starred == "1" {
 		where += " AND COALESCE(`start`, 0) = 1"
 	}
+	if gptStarred == "1" {
+		where += " AND COALESCE(gpt_star, 0) = 1"
+	}
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s %s", table, where)
 	countArgs := append([]any(nil), args...)
 	var total int
@@ -1340,7 +1417,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	sqlText := fmt.Sprintf(`
 SELECT id, stock_code, stock_name, sector_id, COALESCE(sector_name, ''),
        COALESCE(close_price, 0), COALESCE(max_price, 0), COALESCE(min_price, 0),
-       COALESCE(%s, 0), COALESCE(amount, 0), COALESCE(%s, 0), COALESCE(`+"`start`"+`, 0),
+       COALESCE(%s, 0), COALESCE(amount, 0), COALESCE(%s, 0), COALESCE(`+"`start`"+`, 0), COALESCE(gpt_star, 0),
        %s,
        %s,
        DATE_FORMAT(gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
@@ -1371,6 +1448,7 @@ LIMIT ? OFFSET ?`, riseField, volField, breakoutFields, coverFields, table, wher
 			&row.Amount,
 			&row.Vol,
 			&row.Start,
+			&row.GPTStar,
 			&row.BeforeMaxPrice,
 			&row.BeforeMaxVol,
 			&row.BeforeMaxTime,
@@ -1454,6 +1532,8 @@ func allowedSortField(table string, field string) string {
 		return "gmt_create"
 	case "start":
 		return "`start`"
+	case "gpt_star":
+		return "gpt_star"
 	case "gmt_create":
 		return "gmt_create"
 	default:
@@ -1536,7 +1616,7 @@ func nextMacroRun(now time.Time) time.Time {
 		location = time.FixedZone("Asia/Shanghai", 8*60*60)
 	}
 	localNow := now.In(location)
-	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 0, 0, 0, location)
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 6, 0, 0, 0, location)
 	if !next.After(localNow) {
 		next = next.Add(24 * time.Hour)
 	}
@@ -1575,6 +1655,7 @@ CREATE TABLE IF NOT EXISTS volume_stock (
   amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
   vol DECIMAL(10,4) DEFAULT NULL COMMENT '量比',
   ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
+  gpt_star INT NOT NULL DEFAULT 0 COMMENT 'GPT分析标星',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
@@ -1585,6 +1666,9 @@ CREATE TABLE IF NOT EXISTS volume_stock (
 		return fmt.Errorf("ensure volume_stock table failed: %w", err)
 	}
 	if err := ensureStockPoolStartColumn(ctx, db, "volume_stock"); err != nil {
+		return err
+	}
+	if err := ensureStockPoolGPTStarColumn(ctx, db, "volume_stock"); err != nil {
 		return err
 	}
 	return nil
@@ -1609,6 +1693,7 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
   amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
   high_rate DECIMAL(10,4) DEFAULT NULL COMMENT '最高价涨幅',
   ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
+  gpt_star INT NOT NULL DEFAULT 0 COMMENT 'GPT分析标星',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
@@ -1619,6 +1704,9 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
 		return fmt.Errorf("ensure shadow_stock table failed: %w", err)
 	}
 	if err := ensureStockPoolStartColumn(ctx, db, "shadow_stock"); err != nil {
+		return err
+	}
+	if err := ensureStockPoolGPTStarColumn(ctx, db, "shadow_stock"); err != nil {
 		return err
 	}
 	if err := ensureShadowStockExtraColumns(ctx, db); err != nil {
@@ -1661,6 +1749,7 @@ CREATE TABLE IF NOT EXISTS breakout_stock (
   amount DECIMAL(50,4) DEFAULT NULL COMMENT '成交额',
   vol DECIMAL(10,4) DEFAULT NULL COMMENT '今日成交量/前高日成交量',
   ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
+  gpt_star INT NOT NULL DEFAULT 0 COMMENT 'GPT分析标星',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
@@ -1671,6 +1760,9 @@ CREATE TABLE IF NOT EXISTS breakout_stock (
 		return fmt.Errorf("ensure breakout_stock table failed: %w", err)
 	}
 	if err := ensureStockPoolStartColumn(ctx, db, "breakout_stock"); err != nil {
+		return err
+	}
+	if err := ensureStockPoolGPTStarColumn(ctx, db, "breakout_stock"); err != nil {
 		return err
 	}
 	if err := ensureBreakoutStockExtraColumns(ctx, db); err != nil {
@@ -1710,6 +1802,13 @@ func ensureStockPoolStartColumn(ctx context.Context, db *sql.DB, table string) e
 		return fmt.Errorf("invalid stock pool table")
 	}
 	return ensureTableColumn(ctx, db, table, "start", fmt.Sprintf("ALTER TABLE %s ADD COLUMN `start` INT NOT NULL DEFAULT 0 COMMENT '是否标星'", table))
+}
+
+func ensureStockPoolGPTStarColumn(ctx context.Context, db *sql.DB, table string) error {
+	if !isStockPoolTable(table) {
+		return fmt.Errorf("invalid stock pool table")
+	}
+	return ensureTableColumn(ctx, db, table, "gpt_star", fmt.Sprintf("ALTER TABLE %s ADD COLUMN gpt_star INT NOT NULL DEFAULT 0 COMMENT 'GPT分析标星'", table))
 }
 
 func ensureTableColumn(ctx context.Context, db *sql.DB, table string, column string, alterSQL string) error {

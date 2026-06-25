@@ -4,11 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>股票池监控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260624-12" />
+  <link rel="stylesheet" href="/styles.css?v=20260625-1" />
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
+    <header class="app-header">
       <div class="brand">
         <strong>股票池</strong>
         <span>监控台</span>
@@ -19,7 +19,7 @@
         <button class="menu-item" type="button" data-pool="breakout">突破股票池</button>
         <button class="menu-item" type="button" data-pool="macro">宏观数据</button>
       </nav>
-    </aside>
+    </header>
 
     <main class="shell">
       <header class="topbar">
@@ -44,6 +44,10 @@
         <label class="star-filter">
           只看标星
           <input id="starredOnly" type="checkbox" />
+        </label>
+        <label class="star-filter">
+          只看GPT星
+          <input id="gptStarredOnly" type="checkbox" />
         </label>
         <label>每页显示
           <select id="pageSize">
@@ -89,6 +93,7 @@
             <tr>
               <th class="select-col"><input id="selectAllRows" type="checkbox" aria-label="全选当前页" /></th>
               <th data-sort="start" class="star-col">星标 <span class="sort-arrow"></span></th>
+              <th data-sort="gpt_star" class="star-col">GPT星 <span class="sort-arrow"></span></th>
               <th data-sort="stock_code">代码 <span class="sort-arrow"></span></th>
               <th data-sort="stock_name">名称 <span class="sort-arrow"></span></th>
               <th data-sort="sector_name">行业 <span class="sort-arrow"></span></th>
@@ -120,6 +125,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260624-12"></script>
+  <script src="/app.js?v=20260625-1"></script>
 </body>
 </html>

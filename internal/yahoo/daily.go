@@ -65,7 +65,11 @@ type BreakoutStock struct {
 	GmtCreate      time.Time
 }
 
-const minPoolAmount = 500000000
+const (
+	minPoolAmount              = 500000000
+	breakoutExcludeRecentDays  = 5
+	breakoutPreviousWindowDays = 66
+)
 
 type chartResponse struct {
 	Chart struct {
@@ -334,7 +338,7 @@ func buildBreakoutStocks(meta StockMeta, quote dailyQuote, timestamps []int64, d
 			continue
 		}
 
-		beforeMaxPrice, beforeMaxVol, beforeMaxTime, ok := previousBreakoutHigh(quote, timestamps, todayIndex, 3, 66)
+		beforeMaxPrice, beforeMaxVol, beforeMaxTime, ok := previousBreakoutHigh(quote, timestamps, todayIndex, breakoutExcludeRecentDays, breakoutPreviousWindowDays)
 		if !ok || beforeMaxPrice == 0 || beforeMaxVol == 0 {
 			continue
 		}

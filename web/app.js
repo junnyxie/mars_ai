@@ -10,6 +10,7 @@ const minAmountEl = document.querySelector("#minAmount");
 const maxAmountInputEl = document.querySelector("#maxAmountInput");
 const coverBelowEl = document.querySelector("#coverBelow");
 const starredOnlyEl = document.querySelector("#starredOnly");
+const gptStarredOnlyEl = document.querySelector("#gptStarredOnly");
 const pageSizeEl = document.querySelector("#pageSize");
 const prevPageEl = document.querySelector("#prevPage");
 const nextPageEl = document.querySelector("#nextPage");
@@ -41,6 +42,7 @@ const pools = {
     api: "/api/volume-stocks",
     deleteApi: "/api/volume-stocks/delete",
     startApi: "/api/volume-stocks/start",
+    gptStarApi: "/api/volume-stocks/gpt-star",
     riseLabel: "涨跌幅",
     metricLabel: "量比",
     maxMetricLabel: "最高量比",
@@ -52,6 +54,7 @@ const pools = {
     api: "/api/shadow-stocks",
     deleteApi: "/api/shadow-stocks/delete",
     startApi: "/api/shadow-stocks/start",
+    gptStarApi: "/api/shadow-stocks/gpt-star",
     riseLabel: "收盘涨幅",
     metricLabel: "最高价涨幅",
     maxMetricLabel: "最高价涨幅",
@@ -63,6 +66,7 @@ const pools = {
     api: "/api/breakout-stocks",
     deleteApi: "/api/breakout-stocks/delete",
     startApi: "/api/breakout-stocks/start",
+    gptStarApi: "/api/breakout-stocks/gpt-star",
     riseLabel: "涨跌幅",
     metricLabel: "量能接近度",
     maxMetricLabel: "最高量能比",
@@ -151,6 +155,7 @@ function buildQueryParams() {
   if (maxAmountInputEl.value !== "") params.set("max_amount", amountYiToRaw(maxAmountInputEl.value));
   if (currentPool === "shadow" && coverBelowEl.checked) params.set("cover_below", "1");
   if (starredOnlyEl.checked) params.set("starred", "1");
+  if (gptStarredOnlyEl.checked) params.set("gpt_starred", "1");
   return params;
 }
 
@@ -217,6 +222,7 @@ function render(rows, poolName) {
     <tr>
       <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
       <td class="star-col"><button class="star-btn ${toNumber(row.start) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-start="${toNumber(row.start) === 1 ? 1 : 0}" aria-label="标星 ${row.stock_code}">★</button></td>
+      <td class="star-col"><button class="gpt-star-btn ${toNumber(row.gpt_star) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-gpt-star="${toNumber(row.gpt_star) === 1 ? 1 : 0}" aria-label="GPT标星 ${row.stock_code}">G</button></td>
       <td class="code-cell">${stockCodeCell(row)}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
@@ -297,6 +303,11 @@ starredOnlyEl.addEventListener("change", () => {
   loadRows();
 });
 
+gptStarredOnlyEl.addEventListener("change", () => {
+  currentPage = 1;
+  loadRows();
+});
+
 menuEl.addEventListener("click", event => {
   const item = event.target.closest(".menu-item");
   if (!item) return;
@@ -361,6 +372,11 @@ rowsEl.addEventListener("click", event => {
   const starButton = event.target.closest(".star-btn");
   if (starButton) {
     toggleStart(starButton);
+    return;
+  }
+  const gptStarButton = event.target.closest(".gpt-star-btn");
+  if (gptStarButton) {
+    toggleGPTStar(gptStarButton);
     return;
   }
   const button = event.target.closest(".row-delete");
@@ -447,6 +463,35 @@ async function toggleStart(button) {
   } catch (err) {
     button.dataset.start = String(previousStart);
     button.classList.toggle("active", previousStart === 1);
+    setStatus(err.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function toggleGPTStar(button) {
+  const id = toNumber(button.dataset.id);
+  if (!id) return;
+  const nextStar = toNumber(button.dataset.gptStar) === 1 ? 0 : 1;
+  const previousStar = toNumber(button.dataset.gptStar) === 1 ? 1 : 0;
+  button.disabled = true;
+  button.dataset.gptStar = String(nextStar);
+  button.classList.toggle("active", nextStar === 1);
+  setStatus("Saving");
+  try {
+    const res = await fetch(pools[currentPool].gptStarApi, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, gpt_star: nextStar })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    setStatus("Ready");
+    if (gptStarredOnlyEl.checked && nextStar === 0) {
+      await loadRows();
+    }
+  } catch (err) {
+    button.dataset.gptStar = String(previousStar);
+    button.classList.toggle("active", previousStar === 1);
     setStatus(err.message);
   } finally {
     button.disabled = false;
