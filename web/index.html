@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>股票池监控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260625-1" />
+  <link rel="stylesheet" href="/styles.css?v=20260625-2" />
 </head>
 <body>
   <div class="app-shell">
@@ -17,6 +17,7 @@
         <button class="menu-item active" type="button" data-pool="volume">放量股票池</button>
         <button class="menu-item" type="button" data-pool="shadow">上影线试盘池</button>
         <button class="menu-item" type="button" data-pool="breakout">突破股票池</button>
+        <button class="menu-item" type="button" data-pool="watchlist">监控股票池</button>
         <button class="menu-item" type="button" data-pool="macro">宏观数据</button>
       </nav>
     </header>
@@ -92,17 +93,23 @@
           <thead>
             <tr>
               <th class="select-col"><input id="selectAllRows" type="checkbox" aria-label="全选当前页" /></th>
-              <th data-sort="start" class="star-col">星标 <span class="sort-arrow"></span></th>
-              <th data-sort="gpt_star" class="star-col">GPT星 <span class="sort-arrow"></span></th>
+              <th data-sort="start" class="star-col pool-only">星标 <span class="sort-arrow"></span></th>
+              <th data-sort="gpt_star" class="star-col pool-only">GPT星 <span class="sort-arrow"></span></th>
               <th data-sort="stock_code">代码 <span class="sort-arrow"></span></th>
               <th data-sort="stock_name">名称 <span class="sort-arrow"></span></th>
               <th data-sort="sector_name">行业 <span class="sort-arrow"></span></th>
-              <th data-sort="close_price">收盘 <span class="sort-arrow"></span></th>
-              <th data-sort="max_price">最高 <span class="sort-arrow"></span></th>
-              <th data-sort="min_price">最低 <span class="sort-arrow"></span></th>
-              <th data-sort="rise"><span id="riseColumnLabel">涨跌幅</span> <span class="sort-arrow"></span></th>
-              <th data-sort="vol"><span id="volColumnLabel">量比</span> <span class="sort-arrow"></span></th>
-              <th data-sort="amount">成交额(亿) <span class="sort-arrow"></span></th>
+              <th class="watchlist-only" data-sort="source_pool">来源 <span class="sort-arrow"></span></th>
+              <th class="watchlist-only" data-sort="join_time">加入监控时间 <span class="sort-arrow"></span></th>
+              <th class="watchlist-only" data-sort="join_price">加入价 <span class="sort-arrow"></span></th>
+              <th class="watchlist-only" data-sort="current_price">实时价 <span class="sort-arrow"></span></th>
+              <th class="watchlist-only" data-sort="current_time">实时日期 <span class="sort-arrow"></span></th>
+              <th class="watchlist-only" data-sort="rise">监控涨跌幅 <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="close_price">收盘 <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="max_price">最高 <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="min_price">最低 <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="rise"><span id="riseColumnLabel">涨跌幅</span> <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="vol"><span id="volColumnLabel">量比</span> <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="amount">成交额(亿) <span class="sort-arrow"></span></th>
               <th class="breakout-only" data-sort="before_max_price">前高价 <span class="sort-arrow"></span></th>
               <th class="breakout-only" data-sort="before_max_vol">前高日成交量 <span class="sort-arrow"></span></th>
               <th class="breakout-only" data-sort="before_max_time">前高日期 <span class="sort-arrow"></span></th>
@@ -110,7 +117,7 @@
               <th class="shadow-only">首次覆盖时间</th>
               <th class="shadow-only">最新覆盖价</th>
               <th class="shadow-only">最新覆盖时间</th>
-              <th data-sort="gmt_create">时间 <span class="sort-arrow"></span></th>
+              <th class="pool-only" data-sort="gmt_create">时间 <span class="sort-arrow"></span></th>
               <th class="actions-col">操作</th>
             </tr>
           </thead>
@@ -125,6 +132,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260625-1"></script>
+  <script src="/app.js?v=20260625-2"></script>
 </body>
 </html>

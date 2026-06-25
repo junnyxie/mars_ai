@@ -451,7 +451,8 @@ body.shadow-mode table {
 }
 
 .breakout-only,
-.shadow-only {
+.shadow-only,
+.watchlist-only {
 	display: none;
 }
 
@@ -465,6 +466,20 @@ body.breakout-mode .breakout-only {
 
 body.shadow-mode .shadow-only {
 	display: table-cell;
+}
+
+body.watchlist-mode table {
+	min-width: 1180px;
+}
+
+body.watchlist-mode .watchlist-only {
+	display: table-cell;
+}
+
+body.watchlist-mode .pool-only,
+body.watchlist-mode .breakout-only,
+body.watchlist-mode .shadow-only {
+	display: none;
 }
 
 th, td {

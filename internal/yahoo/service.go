@@ -37,6 +37,14 @@ type CoverRunResult struct {
 	Failed    int `json:"failed"`
 }
 
+type WatchlistRunResult struct {
+	TotalRows int `json:"total_rows"`
+	Synced    int `json:"synced"`
+	Updated   int `json:"updated"`
+	Skipped   int `json:"skipped"`
+	Failed    int `json:"failed"`
+}
+
 type CombinedRunResult struct {
 	Volume   RunResult `json:"volume"`
 	Shadow   RunResult `json:"shadow"`
@@ -84,6 +92,39 @@ type StockPoolPage struct {
 	Total    int              `json:"total"`
 	Page     int              `json:"page"`
 	PageSize int              `json:"page_size"`
+}
+
+type WatchlistStockRow struct {
+	ID           int64   `json:"id"`
+	SourcePool   string  `json:"source_pool"`
+	SourceID     int64   `json:"source_id"`
+	StockCode    string  `json:"stock_code"`
+	StockName    string  `json:"stock_name"`
+	SectorID     int64   `json:"sector_id"`
+	SectorName   string  `json:"sector_name"`
+	JoinTime     string  `json:"join_time"`
+	JoinPrice    float64 `json:"join_price"`
+	CurrentPrice float64 `json:"current_price"`
+	CurrentTime  string  `json:"current_time"`
+	Rise         float64 `json:"rise"`
+	GmtCreate    string  `json:"gmt_create"`
+}
+
+type WatchlistStockPage struct {
+	Rows     []WatchlistStockRow `json:"rows"`
+	Total    int                 `json:"total"`
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
+}
+
+type watchlistUpdateRow struct {
+	ID         int64
+	StockCode  string
+	StockName  string
+	Region     string
+	SectorID   int64
+	SectorName sql.NullString
+	JoinPrice  float64
 }
 
 type deleteStockPoolRowsRequest struct {
@@ -563,6 +604,101 @@ func (r *VolumeRunner) RunShadowCover(ctx context.Context) (CoverRunResult, erro
 	return result, nil
 }
 
+func (r *VolumeRunner) RunWatchlist(ctx context.Context) (WatchlistRunResult, error) {
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return WatchlistRunResult{}, fmt.Errorf("stock pool job is already running")
+	}
+	r.running = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		r.mu.Unlock()
+	}()
+
+	if err := ensureWatchlistStockTable(ctx, r.db); err != nil {
+		return WatchlistRunResult{}, err
+	}
+	result, err := SyncWatchlistCandidates(ctx, r.db)
+	if err != nil {
+		return result, err
+	}
+	updateResult, err := r.UpdateWatchlistPrices(ctx)
+	result.TotalRows = updateResult.TotalRows
+	result.Updated = updateResult.Updated
+	result.Skipped += updateResult.Skipped
+	result.Failed += updateResult.Failed
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (r *VolumeRunner) UpdateWatchlistPrices(ctx context.Context) (WatchlistRunResult, error) {
+	if err := ensureWatchlistStockTable(ctx, r.db); err != nil {
+		return WatchlistRunResult{}, err
+	}
+	rows, err := LoadWatchlistUpdateRows(ctx, r.db)
+	if err != nil {
+		return WatchlistRunResult{}, err
+	}
+	result := WatchlistRunResult{TotalRows: len(rows)}
+	period1, period2 := shadowCoverPeriods(time.Now())
+	quoteCache := make(map[string]struct {
+		quote      dailyQuote
+		timestamps []int64
+	})
+	requestCount := 0
+	for _, row := range rows {
+		if row.JoinPrice <= 0 {
+			result.Skipped++
+			continue
+		}
+		meta := StockMeta{
+			StockCode:  row.StockCode,
+			StockName:  row.StockName,
+			Region:     row.Region,
+			SectorID:   row.SectorID,
+			SectorName: row.SectorName,
+		}
+		cacheKey := row.Region + ":" + row.StockCode
+		cached, ok := quoteCache[cacheKey]
+		if !ok {
+			if requestCount > 0 {
+				time.Sleep(100 * time.Millisecond)
+			}
+			quote, timestamps, _, err := fetchDailyQuote(ctx, r.client, meta, period1, period2)
+			if err != nil {
+				result.Failed++
+				log.Printf("[watchlist] fetch failed id=%d stock_code=%s stock_name=%s err=%v", row.ID, row.StockCode, row.StockName, err)
+				continue
+			}
+			requestCount++
+			cached = struct {
+				quote      dailyQuote
+				timestamps []int64
+			}{quote: quote, timestamps: timestamps}
+			quoteCache[cacheKey] = cached
+		}
+		price, priceTime, ok := latestClose(cached.quote, cached.timestamps)
+		if !ok {
+			result.Skipped++
+			continue
+		}
+		rise := round((price-row.JoinPrice)/row.JoinPrice*100, 4)
+		if err := UpdateWatchlistPrice(ctx, r.db, row.ID, price, priceTime, rise); err != nil {
+			result.Failed++
+			log.Printf("[watchlist] update failed id=%d stock_code=%s stock_name=%s err=%v", row.ID, row.StockCode, row.StockName, err)
+			continue
+		}
+		result.Updated++
+		log.Printf("[watchlist] updated id=%d stock_code=%s stock_name=%s current_price=%.2f current_time=%s rise=%.2f", row.ID, row.StockCode, row.StockName, price, priceTime.Format("2006-01-02"), rise)
+	}
+	return result, nil
+}
+
 func (r *VolumeRunner) ServeHTTP(addr string) error {
 	webLogger, webLogWriter, err := logging.NewWebLogger()
 	if err != nil {
@@ -646,6 +782,34 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 				return
 			}
 			log.Printf("[shadow-cover] async run done result=%+v", result)
+			watchlistResult, err := r.RunWatchlist(ctx)
+			if err != nil {
+				log.Printf("[watchlist] async run after shadow-cover failed: %v", err)
+				return
+			}
+			log.Printf("[watchlist] async run after shadow-cover done result=%+v", watchlistResult)
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started"})
+	})
+	mux.HandleFunc("/watchlist/run", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost && req.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.IsRunning() {
+			http.Error(w, "stock pool job is already running", http.StatusConflict)
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			result, err := r.RunWatchlist(ctx)
+			if err != nil {
+				log.Printf("[watchlist] async run failed: %v", err)
+				return
+			}
+			log.Printf("[watchlist] async run done result=%+v", result)
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "started"})
@@ -709,6 +873,7 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	mux.HandleFunc("/api/volume-stocks", r.handleVolumeStocks)
 	mux.HandleFunc("/api/shadow-stocks", r.handleShadowStocks)
 	mux.HandleFunc("/api/breakout-stocks", r.handleBreakoutStocks)
+	mux.HandleFunc("/api/watchlist-stocks", r.handleWatchlistStocks)
 	mux.HandleFunc("/api/stock-pool/export", r.handleExportStockPool)
 	mux.HandleFunc("/api/macro-market/day", r.handleMacroMarketDay)
 	mux.HandleFunc("/api/macro-market", r.handleMacroMarket)
@@ -723,6 +888,7 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	mux.HandleFunc("/api/volume-stocks/gpt-star", r.handleUpdateVolumeGPTStar)
 	mux.HandleFunc("/api/shadow-stocks/gpt-star", r.handleUpdateShadowGPTStar)
 	mux.HandleFunc("/api/breakout-stocks/gpt-star", r.handleUpdateBreakoutGPTStar)
+	mux.HandleFunc("/api/watchlist-stocks/delete", r.handleDeleteWatchlistStocks)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	go r.scheduleDaily()
@@ -797,6 +963,16 @@ func (r *VolumeRunner) handleShadowStocks(w http.ResponseWriter, req *http.Reque
 
 func (r *VolumeRunner) handleBreakoutStocks(w http.ResponseWriter, req *http.Request) {
 	page, err := queryStockPoolRows(req.Context(), r.db, req, "breakout_stock")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(page)
+}
+
+func (r *VolumeRunner) handleWatchlistStocks(w http.ResponseWriter, req *http.Request) {
+	page, err := queryWatchlistRows(req.Context(), r.db, req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -899,6 +1075,25 @@ func (r *VolumeRunner) handleDeleteShadowStocks(w http.ResponseWriter, req *http
 
 func (r *VolumeRunner) handleDeleteBreakoutStocks(w http.ResponseWriter, req *http.Request) {
 	r.handleDeleteStockPoolRows(w, req, "breakout_stock")
+}
+
+func (r *VolumeRunner) handleDeleteWatchlistStocks(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload deleteStockPoolRowsRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	deleted, err := DeleteWatchlistRows(req.Context(), r.db, payload.IDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(deleteStockPoolRowsResponse{Deleted: deleted})
 }
 
 func (r *VolumeRunner) handleUpdateVolumeStart(w http.ResponseWriter, req *http.Request) {
@@ -1201,6 +1396,58 @@ func DeleteStockPoolRows(ctx context.Context, db *sql.DB, table string, ids []in
 	if err != nil {
 		return 0, fmt.Errorf("read deleted rows failed: %w", err)
 	}
+	if table == "shadow_stock" || table == "breakout_stock" {
+		sourcePool, err := watchlistSourcePool(table)
+		if err != nil {
+			return 0, err
+		}
+		for _, arg := range args {
+			id, ok := arg.(int64)
+			if !ok {
+				continue
+			}
+			if err := deleteWatchlistBySource(ctx, db, sourcePool, id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return deleted, nil
+}
+
+func DeleteWatchlistRows(ctx context.Context, db *sql.DB, ids []int64) (int64, error) {
+	if err := ensureWatchlistStockTable(ctx, db); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("ids cannot be empty")
+	}
+	if len(ids) > 500 {
+		return 0, fmt.Errorf("delete at most 500 rows once")
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return 0, fmt.Errorf("invalid id")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return 0, fmt.Errorf("ids cannot be empty")
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
+	result, err := db.ExecContext(ctx, fmt.Sprintf("DELETE FROM watchlist_stock WHERE id IN (%s)", placeholders), args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete watchlist_stock rows failed: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read deleted rows failed: %w", err)
+	}
 	return deleted, nil
 }
 
@@ -1228,6 +1475,11 @@ func UpdateStockPoolStart(ctx context.Context, db *sql.DB, table string, id int6
 	}
 	if affected == 0 {
 		return fmt.Errorf("row not found")
+	}
+	if table == "shadow_stock" || table == "breakout_stock" {
+		if err := SyncWatchlistFromPoolRow(ctx, db, table, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1257,7 +1509,175 @@ func UpdateStockPoolGPTStar(ctx context.Context, db *sql.DB, table string, id in
 	if affected == 0 {
 		return fmt.Errorf("row not found")
 	}
+	if table == "shadow_stock" || table == "breakout_stock" {
+		if err := SyncWatchlistFromPoolRow(ctx, db, table, id); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func SyncWatchlistCandidates(ctx context.Context, db *sql.DB) (WatchlistRunResult, error) {
+	if err := ensureWatchlistStockTable(ctx, db); err != nil {
+		return WatchlistRunResult{}, err
+	}
+	result := WatchlistRunResult{}
+	for _, table := range []string{"shadow_stock", "breakout_stock"} {
+		ids, err := loadWatchlistCandidateIDs(ctx, db, table)
+		if err != nil {
+			return result, err
+		}
+		for _, id := range ids {
+			if err := SyncWatchlistFromPoolRow(ctx, db, table, id); err != nil {
+				result.Failed++
+				log.Printf("[watchlist] sync candidate failed table=%s id=%d err=%v", table, id, err)
+				continue
+			}
+			result.Synced++
+		}
+	}
+	return result, nil
+}
+
+func loadWatchlistCandidateIDs(ctx context.Context, db *sql.DB, table string) ([]int64, error) {
+	if err := ensureStockPoolTable(ctx, db, table); err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s WHERE COALESCE(`start`, 0) = 1 AND COALESCE(gpt_star, 0) = 1 ORDER BY id", table))
+	if err != nil {
+		return nil, fmt.Errorf("load %s watchlist candidate ids failed: %w", table, err)
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan %s watchlist candidate id failed: %w", table, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s watchlist candidate ids failed: %w", table, err)
+	}
+	return ids, nil
+}
+
+func SyncWatchlistFromPoolRow(ctx context.Context, db *sql.DB, table string, id int64) error {
+	sourcePool, err := watchlistSourcePool(table)
+	if err != nil {
+		return err
+	}
+	if err := ensureWatchlistStockTable(ctx, db); err != nil {
+		return err
+	}
+	if err := ensureStockPoolTable(ctx, db, table); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("invalid id")
+	}
+	if table == "shadow_stock" {
+		return syncShadowWatchlistRow(ctx, db, sourcePool, id)
+	}
+	return syncBreakoutWatchlistRow(ctx, db, sourcePool, id)
+}
+
+func syncShadowWatchlistRow(ctx context.Context, db *sql.DB, sourcePool string, id int64) error {
+	var row struct {
+		StockCode       string
+		StockName       string
+		SectorID        int64
+		SectorName      sql.NullString
+		Start           int
+		GPTStar         int
+		FirstCoverPrice sql.NullFloat64
+		FirstCoverTime  sql.NullTime
+		NowCoverPrice   sql.NullFloat64
+		NowCoverTime    sql.NullTime
+	}
+	err := db.QueryRowContext(ctx, `
+SELECT stock_code, stock_name, sector_id, sector_name, COALESCE(`+"`start`"+`, 0), COALESCE(gpt_star, 0),
+       first_cover_price, first_cover_time, now_cover_price, now_cover_time
+FROM shadow_stock
+WHERE id = ?`, id).Scan(&row.StockCode, &row.StockName, &row.SectorID, &row.SectorName, &row.Start, &row.GPTStar, &row.FirstCoverPrice, &row.FirstCoverTime, &row.NowCoverPrice, &row.NowCoverTime)
+	if errors.Is(err, sql.ErrNoRows) {
+		return deleteWatchlistBySource(ctx, db, sourcePool, id)
+	}
+	if err != nil {
+		return fmt.Errorf("load shadow_stock id=%d for watchlist failed: %w", id, err)
+	}
+	if row.Start != 1 || row.GPTStar != 1 || !row.FirstCoverPrice.Valid || !row.FirstCoverTime.Valid {
+		return deleteWatchlistBySource(ctx, db, sourcePool, id)
+	}
+	return upsertWatchlistRow(ctx, db, sourcePool, id, row.StockCode, row.StockName, row.SectorID, row.SectorName, row.FirstCoverTime.Time, row.FirstCoverPrice.Float64)
+}
+
+func syncBreakoutWatchlistRow(ctx context.Context, db *sql.DB, sourcePool string, id int64) error {
+	var row struct {
+		StockCode  string
+		StockName  string
+		SectorID   int64
+		SectorName sql.NullString
+		ClosePrice float64
+		Start      int
+		GPTStar    int
+		GmtCreate  time.Time
+	}
+	err := db.QueryRowContext(ctx, `
+SELECT stock_code, stock_name, sector_id, sector_name, COALESCE(close_price, 0), COALESCE(`+"`start`"+`, 0), COALESCE(gpt_star, 0), gmt_create
+FROM breakout_stock
+WHERE id = ?`, id).Scan(&row.StockCode, &row.StockName, &row.SectorID, &row.SectorName, &row.ClosePrice, &row.Start, &row.GPTStar, &row.GmtCreate)
+	if errors.Is(err, sql.ErrNoRows) {
+		return deleteWatchlistBySource(ctx, db, sourcePool, id)
+	}
+	if err != nil {
+		return fmt.Errorf("load breakout_stock id=%d for watchlist failed: %w", id, err)
+	}
+	if row.Start != 1 || row.GPTStar != 1 || row.ClosePrice <= 0 {
+		return deleteWatchlistBySource(ctx, db, sourcePool, id)
+	}
+	return upsertWatchlistRow(ctx, db, sourcePool, id, row.StockCode, row.StockName, row.SectorID, row.SectorName, row.GmtCreate, row.ClosePrice)
+}
+
+func upsertWatchlistRow(ctx context.Context, db *sql.DB, sourcePool string, sourceID int64, stockCode string, stockName string, sectorID int64, sectorName sql.NullString, joinTime time.Time, joinPrice float64) error {
+	_, err := db.ExecContext(ctx, `
+INSERT INTO watchlist_stock
+  (source_pool, source_id, stock_code, stock_name, sector_id, sector_name, join_time, join_price)
+VALUES
+  (?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  stock_code = VALUES(stock_code),
+  stock_name = VALUES(stock_name),
+  sector_id = VALUES(sector_id),
+  sector_name = VALUES(sector_name),
+  join_time = VALUES(join_time),
+  join_price = VALUES(join_price)`,
+		sourcePool, sourceID, stockCode, stockName, sectorID, sectorName, joinTime, joinPrice)
+	if err != nil {
+		return fmt.Errorf("upsert watchlist_stock source=%s id=%d failed: %w", sourcePool, sourceID, err)
+	}
+	return nil
+}
+
+func deleteWatchlistBySource(ctx context.Context, db *sql.DB, sourcePool string, sourceID int64) error {
+	if err := ensureWatchlistStockTable(ctx, db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM watchlist_stock WHERE source_pool = ? AND source_id = ?", sourcePool, sourceID); err != nil {
+		return fmt.Errorf("delete watchlist_stock source=%s id=%d failed: %w", sourcePool, sourceID, err)
+	}
+	return nil
+}
+
+func watchlistSourcePool(table string) (string, error) {
+	switch table {
+	case "shadow_stock":
+		return "shadow", nil
+	case "breakout_stock":
+		return "breakout", nil
+	default:
+		return "", fmt.Errorf("watchlist only supports shadow_stock and breakout_stock")
+	}
 }
 
 func LoadShadowCoverRows(ctx context.Context, db *sql.DB) ([]ShadowCoverRow, error) {
@@ -1302,6 +1722,36 @@ ORDER BY ss.id
 	return result, nil
 }
 
+func LoadWatchlistUpdateRows(ctx context.Context, db *sql.DB) ([]watchlistUpdateRow, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT ws.id, ws.stock_code, ws.stock_name, COALESCE(s.region, ''),
+       ws.sector_id, ws.sector_name, COALESCE(ws.join_price, 0)
+FROM watchlist_stock ws
+JOIN stock s ON s.stock_code = ws.stock_code
+WHERE s.region IN ('SH', 'SZ')
+ORDER BY ws.id`)
+	if err != nil {
+		return nil, fmt.Errorf("load watchlist rows failed: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]watchlistUpdateRow, 0)
+	for rows.Next() {
+		var row watchlistUpdateRow
+		if err := rows.Scan(&row.ID, &row.StockCode, &row.StockName, &row.Region, &row.SectorID, &row.SectorName, &row.JoinPrice); err != nil {
+			return nil, fmt.Errorf("scan watchlist row failed: %w", err)
+		}
+		if isSTStockName(row.StockName) {
+			continue
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate watchlist rows failed: %w", err)
+	}
+	return result, nil
+}
+
 func UpdateShadowFirstCover(ctx context.Context, db *sql.DB, id int64, firstPrice float64, firstCoverTime time.Time, nowPrice float64, nowCoverTime time.Time) error {
 	_, err := db.ExecContext(ctx, `
 UPDATE shadow_stock
@@ -1325,6 +1775,137 @@ WHERE id = ?
 		return fmt.Errorf("update shadow now cover id=%d failed: %w", id, err)
 	}
 	return nil
+}
+
+func UpdateWatchlistPrice(ctx context.Context, db *sql.DB, id int64, price float64, priceTime time.Time, rise float64) error {
+	_, err := db.ExecContext(ctx, `
+UPDATE watchlist_stock
+SET current_price = ?, `+"`current_time`"+` = ?, rise = ?
+WHERE id = ?`, price, priceTime, rise, id)
+	if err != nil {
+		return fmt.Errorf("update watchlist price id=%d failed: %w", id, err)
+	}
+	return nil
+}
+
+func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (WatchlistStockPage, error) {
+	if err := ensureWatchlistStockTable(ctx, db); err != nil {
+		return WatchlistStockPage{}, err
+	}
+	query := req.URL.Query()
+	startDate := query.Get("start")
+	endDate := query.Get("end")
+	sourcePool := query.Get("source_pool")
+	sortField := allowedWatchlistSortField(query.Get("sort"))
+	sortDir := "DESC"
+	if query.Get("dir") == "asc" {
+		sortDir = "ASC"
+	}
+	page := 1
+	if value := query.Get("page"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			return WatchlistStockPage{}, fmt.Errorf("invalid page")
+		}
+		page = parsed
+	}
+	pageSize := 50
+	if value := query.Get("page_size"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || (parsed != 10 && parsed != 50 && parsed != 100) {
+			return WatchlistStockPage{}, fmt.Errorf("invalid page_size")
+		}
+		pageSize = parsed
+	}
+	args := []any{}
+	where := "WHERE 1=1"
+	if startDate != "" {
+		where += " AND join_time >= ?"
+		args = append(args, startDate+" 00:00:00")
+	}
+	if endDate != "" {
+		where += " AND join_time <= ?"
+		args = append(args, endDate+" 23:59:59")
+	}
+	if sourcePool != "" {
+		if sourcePool != "shadow" && sourcePool != "breakout" {
+			return WatchlistStockPage{}, fmt.Errorf("invalid source_pool")
+		}
+		where += " AND source_pool = ?"
+		args = append(args, sourcePool)
+	}
+
+	var total int
+	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM watchlist_stock %s", where), args...).Scan(&total); err != nil {
+		return WatchlistStockPage{}, fmt.Errorf("count watchlist_stock failed: %w", err)
+	}
+	offset := (page - 1) * pageSize
+	args = append(args, pageSize, offset)
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+SELECT id, source_pool, source_id, stock_code, stock_name, sector_id, COALESCE(sector_name, ''),
+       DATE_FORMAT(join_time, '%%Y-%%m-%%d %%H:%%i:%%s'), COALESCE(join_price, 0),
+       COALESCE(current_price, 0), COALESCE(DATE_FORMAT(`+"`current_time`"+`, '%%Y-%%m-%%d %%H:%%i:%%s'), ''),
+       COALESCE(rise, 0), DATE_FORMAT(gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
+FROM watchlist_stock
+%s
+ORDER BY %s %s
+LIMIT ? OFFSET ?`, where, sortField, sortDir), args...)
+	if err != nil {
+		return WatchlistStockPage{}, fmt.Errorf("query watchlist_stock failed: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]WatchlistStockRow, 0, pageSize)
+	for rows.Next() {
+		var row WatchlistStockRow
+		if err := rows.Scan(
+			&row.ID,
+			&row.SourcePool,
+			&row.SourceID,
+			&row.StockCode,
+			&row.StockName,
+			&row.SectorID,
+			&row.SectorName,
+			&row.JoinTime,
+			&row.JoinPrice,
+			&row.CurrentPrice,
+			&row.CurrentTime,
+			&row.Rise,
+			&row.GmtCreate,
+		); err != nil {
+			return WatchlistStockPage{}, fmt.Errorf("scan watchlist_stock failed: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return WatchlistStockPage{}, fmt.Errorf("iterate watchlist_stock failed: %w", err)
+	}
+	return WatchlistStockPage{Rows: result, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func allowedWatchlistSortField(field string) string {
+	switch field {
+	case "source_pool":
+		return "source_pool"
+	case "stock_code":
+		return "stock_code"
+	case "stock_name":
+		return "stock_name"
+	case "sector_name":
+		return "sector_name"
+	case "join_time":
+		return "join_time"
+	case "join_price":
+		return "join_price"
+	case "current_price":
+		return "current_price"
+	case "current_time":
+		return "`current_time`"
+	case "rise":
+		return "rise"
+	default:
+		return "join_time"
+	}
 }
 
 func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, table string) (StockPoolPage, error) {
@@ -1560,6 +2141,9 @@ func (r *VolumeRunner) scheduleDaily() {
 		}
 		log.Printf("[schedule] stock pool run done: volume=%+v shadow=%+v breakout=%+v", result.Volume, result.Shadow, result.Breakout)
 
+		cancel()
+
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Hour)
 		coverResult, err := r.RunShadowCover(ctx)
 		cancel()
 		if err != nil {
@@ -1567,6 +2151,15 @@ func (r *VolumeRunner) scheduleDaily() {
 			continue
 		}
 		log.Printf("[schedule] shadow cover run done: %+v", coverResult)
+
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Hour)
+		watchlistResult, err := r.RunWatchlist(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("[schedule] watchlist run failed: %v", err)
+			continue
+		}
+		log.Printf("[schedule] watchlist run done: %+v", watchlistResult)
 	}
 }
 
@@ -1638,6 +2231,34 @@ func shadowCoverPeriods(now time.Time) (int64, int64) {
 	period2 := now.Add(24 * time.Hour).Unix()
 	period1 := now.AddDate(0, 0, -66).Unix()
 	return period1, period2
+}
+
+func ensureWatchlistStockTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS watchlist_stock (
+  id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  source_pool VARCHAR(20) NOT NULL COMMENT '来源池',
+  source_id BIGINT NOT NULL COMMENT '来源记录ID',
+  stock_code VARCHAR(20) NOT NULL COMMENT '股票代码',
+  stock_name VARCHAR(100) NOT NULL COMMENT '股票名称',
+  sector_id BIGINT NOT NULL COMMENT '行业ID',
+  sector_name VARCHAR(100) DEFAULT NULL COMMENT '行业名称',
+  join_time TIMESTAMP NOT NULL COMMENT '加入监控时间',
+  join_price DECIMAL(18,4) NOT NULL COMMENT '加入监控价格',
+  current_price DECIMAL(18,4) DEFAULT NULL COMMENT '监控实时价格',
+  ` + "`current_time`" + ` TIMESTAMP NULL DEFAULT NULL COMMENT '实时价格日期',
+  rise DECIMAL(10,4) DEFAULT NULL COMMENT '监控涨跌幅',
+  gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_source (source_pool, source_id),
+  KEY idx_stock_code (stock_code),
+  KEY idx_join_time (join_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='标星股票监控表'`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("ensure watchlist_stock table failed: %w", err)
+	}
+	return nil
 }
 
 func ensureVolumeStockTable(ctx context.Context, db *sql.DB) error {

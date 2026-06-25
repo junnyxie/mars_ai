@@ -72,6 +72,17 @@ const pools = {
     maxMetricLabel: "最高量能比",
     metricSuffix: ""
   },
+  watchlist: {
+    title: "监控股票池",
+    desc: "手动标星和GPT标星同时满足后加入，跟踪加入后的实时价格表现",
+    api: "/api/watchlist-stocks",
+    deleteApi: "/api/watchlist-stocks/delete",
+    riseLabel: "监控涨跌幅",
+    metricLabel: "涨跌幅",
+    maxMetricLabel: "最高涨幅",
+    metricSuffix: "%",
+    defaultSort: "join_time"
+  },
   macro: {
     title: "宏观数据",
     desc: "全球指数、商品、美元和美债收益率的宏观强弱评分",
@@ -201,6 +212,10 @@ async function loadRows() {
 }
 
 function render(rows, poolName) {
+  if (poolName === "watchlist") {
+    renderWatchlist(rows);
+    return;
+  }
 	const pool = pools[poolName];
 	const stockCodeCell = row => {
 		const href = xueqiuLink(row.stock_code);
@@ -250,13 +265,68 @@ function render(rows, poolName) {
   updateSortArrows();
 }
 
+function sourcePoolLabel(value) {
+  if (value === "shadow") return "上影线";
+  if (value === "breakout") return "突破";
+  return value || "-";
+}
+
+function renderWatchlist(rows) {
+  const stockCodeCell = row => {
+    const href = xueqiuLink(row.stock_code);
+    if (!href) return row.stock_code || "";
+    return `<a class="stock-link" href="${href}" target="_blank" rel="noopener noreferrer">${row.stock_code}</a>`;
+  };
+  rowsEl.innerHTML = rows.map(row => `
+    <tr>
+      <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
+      <td class="star-col pool-only"></td>
+      <td class="star-col pool-only"></td>
+      <td class="code-cell">${stockCodeCell(row)}</td>
+      <td>${row.stock_name}</td>
+      <td>${row.sector_name || ""}</td>
+      <td class="watchlist-only">${sourcePoolLabel(row.source_pool)}</td>
+      <td class="watchlist-only muted">${formatCoverTime(row.join_time)}</td>
+      <td class="watchlist-only">${formatNumber(row.join_price)}</td>
+      <td class="watchlist-only">${formatNumber(row.current_price)}</td>
+      <td class="watchlist-only muted">${formatCoverTime(row.current_time)}</td>
+      <td class="watchlist-only ${toNumber(row.rise) >= 0 ? "rise-up" : ""}">${formatNumber(row.rise)}%</td>
+      <td class="pool-only"></td>
+      <td class="pool-only"></td>
+      <td class="pool-only"></td>
+      <td class="pool-only"></td>
+      <td class="pool-only"></td>
+      <td class="pool-only"></td>
+      <td class="breakout-only"></td>
+      <td class="breakout-only"></td>
+      <td class="breakout-only"></td>
+      <td class="shadow-only"></td>
+      <td class="shadow-only"></td>
+      <td class="shadow-only"></td>
+      <td class="shadow-only"></td>
+      <td class="pool-only muted">${row.gmt_create || ""}</td>
+      <td class="actions-col"><button class="row-delete" type="button" data-id="${row.id}">删除</button></td>
+    </tr>
+  `).join("");
+  selectAllRowsEl.checked = false;
+  selectAllRowsEl.indeterminate = false;
+  updateSelectionState();
+
+  totalCountEl.textContent = totalRows;
+  const maxRise = rows.length ? Math.max(...rows.map(row => toNumber(row.rise))) : null;
+  maxVolEl.textContent = maxRise === null ? "-" : `${formatNumber(maxRise)}%`;
+  maxAmountEl.textContent = rows.length ? formatNumber(Math.max(...rows.map(row => toNumber(row.current_price)))) : "-";
+  updatePager();
+  updateSortArrows();
+}
+
 function applyPool(poolName) {
   if (!pools[poolName]) return;
   currentPool = poolName;
   if (window.location.hash !== `#${poolName}`) {
     window.location.hash = poolName;
   }
-  sortField = defaultSortField;
+  sortField = pools[poolName].defaultSort || defaultSortField;
   sortDir = defaultSortDir;
   currentPage = 1;
   totalRows = 0;
@@ -272,12 +342,19 @@ function applyPool(poolName) {
 	});
 	document.body.classList.toggle("shadow-mode", poolName === "shadow");
 	document.body.classList.toggle("breakout-mode", poolName === "breakout");
+	document.body.classList.toggle("watchlist-mode", poolName === "watchlist");
 	document.body.classList.toggle("macro-mode", poolName === "macro");
   const isMacro = poolName === "macro";
+  const isWatchlist = poolName === "watchlist";
   document.querySelector(".toolbar").style.display = isMacro ? "none" : "";
   document.querySelector(".summary").style.display = isMacro ? "none" : "";
   document.querySelector(".table-wrap").style.display = isMacro ? "none" : "";
   document.querySelector(".pager").style.display = isMacro ? "none" : "";
+  document.querySelectorAll(".star-filter").forEach(el => {
+    el.style.display = isWatchlist ? "none" : "";
+  });
+  exportBtn.style.display = isWatchlist ? "none" : "";
+  maxAmountEl.nextElementSibling.textContent = isWatchlist ? "最高实时价" : "最高成交额(亿)";
   macroPanelEl.style.display = isMacro ? "grid" : "none";
 	resetSummary();
   updateSortArrows();
