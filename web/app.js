@@ -956,6 +956,10 @@ function mergeAILevels(levels) {
   const values = [levels.qwen, levels.yuanbao, levels.chatgpt].filter(Boolean);
   const hasA = values.includes("A");
   const hasC = values.includes("C");
+  const cCount = values.filter(level => level === "C").length;
+  if (cCount >= 2) {
+    return { level: "C", reason: "两个及以上模型给C，直接判C" };
+  }
   if (!hasA) {
     return { level: "C", reason: "没有任何模型给A" };
   }
