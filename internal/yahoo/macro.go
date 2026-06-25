@@ -71,19 +71,20 @@ type MacroMarketScore struct {
 }
 
 type macroMarketSymbol struct {
-	Symbol     string
-	MarketName string
-	MarketType string
-	PriceScale float64
-	Note       string
+	Symbol        string
+	MarketName    string
+	MarketType    string
+	PriceScale    float64
+	DateShiftDays int
+	Note          string
 }
 
 var macroMarketSymbols = []macroMarketSymbol{
 	{Symbol: "^GSPC", MarketName: "标普500", MarketType: "美股指数"},
 	{Symbol: "^IXIC", MarketName: "纳斯达克综合指数", MarketType: "美股指数"},
 	{Symbol: "^DJI", MarketName: "道琼斯工业指数", MarketType: "美股指数"},
-	{Symbol: "^N225", MarketName: "日经225", MarketType: "日本指数"},
-	{Symbol: "^KS11", MarketName: "KOSPI", MarketType: "韩国指数"},
+	{Symbol: "^N225", MarketName: "日经225", MarketType: "日本指数", DateShiftDays: -1},
+	{Symbol: "^KS11", MarketName: "KOSPI", MarketType: "韩国指数", DateShiftDays: -1},
 	{Symbol: "GC=F", MarketName: "黄金期货", MarketType: "商品"},
 	{Symbol: "HG=F", MarketName: "铜期货折算美元/吨", MarketType: "商品", PriceScale: 2204.62262185, Note: "Yahoo HG=F 是 COMEX 铜磅口径，这里折算为美元/吨观察口径"},
 	{Symbol: "CL=F", MarketName: "WTI原油", MarketType: "商品"},
@@ -154,7 +155,7 @@ func fetchMacroMarketItems(ctx context.Context, client *http.Client, symbol macr
 	if err != nil {
 		return nil, err
 	}
-	indexes := macroQuoteIndexes(timestamps, quote, targetDate, days)
+	indexes := macroQuoteIndexes(symbol, timestamps, quote, targetDate, days)
 	if len(indexes) == 0 {
 		return nil, fmt.Errorf("no macro quote found before target_date=%s", targetDate.Format("2006-01-02"))
 	}
@@ -195,9 +196,9 @@ func buildMacroMarketItem(symbol macroMarketSymbol, quote dailyQuote, timestamps
 		MinPrice:   round(*quote.Low[index]*scale, 4),
 		Rise:       round(rise, 4),
 		Volume:     volume,
-		TradeDate:  macroTradeDate(timestamps[index]).Format("2006-01-02"),
+		TradeDate:  macroTradeDate(symbol, timestamps[index]).Format("2006-01-02"),
 		Note:       symbol.Note,
-		tradeTime:  macroTradeDate(timestamps[index]),
+		tradeTime:  macroTradeDate(symbol, timestamps[index]),
 	}, nil
 }
 
@@ -448,21 +449,21 @@ func fetchMacroDailyQuote(ctx context.Context, client *http.Client, symbol strin
 }
 
 func macroQuoteIndex(timestamps []int64, quote dailyQuote, targetDate time.Time) int {
-	indexes := macroQuoteIndexes(timestamps, quote, targetDate, 1)
+	indexes := macroQuoteIndexes(macroMarketSymbol{}, timestamps, quote, targetDate, 1)
 	if len(indexes) == 0 {
 		return -1
 	}
 	return indexes[0]
 }
 
-func macroQuoteIndexes(timestamps []int64, quote dailyQuote, targetDate time.Time, limit int) []int {
+func macroQuoteIndexes(symbol macroMarketSymbol, timestamps []int64, quote dailyQuote, targetDate time.Time, limit int) []int {
 	indexes := make([]int, 0, limit)
 	maxLen := min(len(timestamps), len(quote.Close), len(quote.High), len(quote.Low))
 	for i := maxLen - 1; i >= 0 && len(indexes) < limit; i-- {
 		if quote.Close[i] == nil || quote.High[i] == nil || quote.Low[i] == nil {
 			continue
 		}
-		if !macroTradeDate(timestamps[i]).After(targetDate) {
+		if !macroTradeDate(symbol, timestamps[i]).After(targetDate) {
 			indexes = append(indexes, i)
 		}
 	}
@@ -481,8 +482,12 @@ func previousCloseIndex(closeValues []*float64, todayIndex int) int {
 	return -1
 }
 
-func macroTradeDate(timestamp int64) time.Time {
-	return dateOnly(time.Unix(timestamp, 0))
+func macroTradeDate(symbol macroMarketSymbol, timestamp int64) time.Time {
+	tradeDate := dateOnly(time.Unix(timestamp, 0))
+	if symbol.DateShiftDays != 0 {
+		tradeDate = tradeDate.AddDate(0, 0, symbol.DateShiftDays)
+	}
+	return tradeDate
 }
 
 func ensureMacroMarketDailyTable(ctx context.Context, db *sql.DB) error {
