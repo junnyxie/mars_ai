@@ -75,7 +75,7 @@ type macroMarketSymbol struct {
 	MarketName    string
 	MarketType    string
 	PriceScale    float64
-	DateShiftDays int
+	CloseFallback bool
 	Note          string
 }
 
@@ -83,11 +83,11 @@ var macroMarketSymbols = []macroMarketSymbol{
 	{Symbol: "^GSPC", MarketName: "标普500", MarketType: "美股指数"},
 	{Symbol: "^IXIC", MarketName: "纳斯达克综合指数", MarketType: "美股指数"},
 	{Symbol: "^DJI", MarketName: "道琼斯工业指数", MarketType: "美股指数"},
-	{Symbol: "^N225", MarketName: "日经225", MarketType: "日本指数", DateShiftDays: -1},
-	{Symbol: "^KS11", MarketName: "KOSPI", MarketType: "韩国指数", DateShiftDays: -1},
-	{Symbol: "GC=F", MarketName: "黄金期货", MarketType: "商品"},
-	{Symbol: "HG=F", MarketName: "铜期货折算美元/吨", MarketType: "商品", PriceScale: 2204.62262185, Note: "Yahoo HG=F 是 COMEX 铜磅口径，这里折算为美元/吨观察口径"},
-	{Symbol: "CL=F", MarketName: "WTI原油", MarketType: "商品"},
+	{Symbol: "^N225", MarketName: "日经225", MarketType: "日本指数"},
+	{Symbol: "^KS11", MarketName: "KOSPI", MarketType: "韩国指数"},
+	{Symbol: "GC=F", MarketName: "黄金期货", MarketType: "商品", CloseFallback: true},
+	{Symbol: "HG=F", MarketName: "铜期货折算美元/吨", MarketType: "商品", PriceScale: 2204.62262185, CloseFallback: true, Note: "Yahoo HG=F 是 COMEX 铜磅口径，这里折算为美元/吨观察口径"},
+	{Symbol: "CL=F", MarketName: "WTI原油", MarketType: "商品", CloseFallback: true},
 	{Symbol: "DX-Y.NYB", MarketName: "美元指数", MarketType: "美元指数"},
 	{Symbol: "^TNX", MarketName: "10年美债收益率", MarketType: "美债收益率"},
 }
@@ -171,11 +171,11 @@ func fetchMacroMarketItems(ctx context.Context, client *http.Client, symbol macr
 }
 
 func buildMacroMarketItem(symbol macroMarketSymbol, quote dailyQuote, timestamps []int64, index int) (MacroMarketItem, error) {
-	previousIndex := previousCloseIndex(quote.Close, index)
+	previousIndex := previousMacroCloseIndex(symbol, quote, index)
 	if previousIndex < 0 {
 		return MacroMarketItem{}, fmt.Errorf("no previous quote found for %s", symbol.Symbol)
 	}
-	closeValue, ok := macroCloseValue(quote.Close, index)
+	closeValue, ok := macroCloseValue(symbol, quote.Close, index)
 	if !ok {
 		return MacroMarketItem{}, fmt.Errorf("no close quote found for %s", symbol.Symbol)
 	}
@@ -467,7 +467,7 @@ func macroQuoteIndexes(symbol macroMarketSymbol, timestamps []int64, quote daily
 		if quote.High[i] == nil || quote.Low[i] == nil {
 			continue
 		}
-		if _, ok := macroCloseValue(quote.Close, i); !ok {
+		if _, ok := macroCloseValue(symbol, quote.Close, i); !ok {
 			continue
 		}
 		if !macroTradeDate(symbol, timestamps[i]).After(targetDate) {
@@ -477,12 +477,15 @@ func macroQuoteIndexes(symbol macroMarketSymbol, timestamps []int64, quote daily
 	return indexes
 }
 
-func macroCloseValue(closeValues []*float64, index int) (float64, bool) {
+func macroCloseValue(symbol macroMarketSymbol, closeValues []*float64, index int) (float64, bool) {
 	if index < 0 || index >= len(closeValues) {
 		return 0, false
 	}
 	if closeValues[index] != nil {
 		return *closeValues[index], true
+	}
+	if !symbol.CloseFallback {
+		return 0, false
 	}
 	for i := index + 1; i < len(closeValues); i++ {
 		if closeValues[i] != nil {
@@ -504,12 +507,23 @@ func previousCloseIndex(closeValues []*float64, todayIndex int) int {
 	return -1
 }
 
-func macroTradeDate(symbol macroMarketSymbol, timestamp int64) time.Time {
-	tradeDate := dateOnly(time.Unix(timestamp, 0))
-	if symbol.DateShiftDays != 0 {
-		tradeDate = tradeDate.AddDate(0, 0, symbol.DateShiftDays)
+func previousMacroCloseIndex(symbol macroMarketSymbol, quote dailyQuote, todayIndex int) int {
+	previousIndex := previousCloseIndex(quote.Close, todayIndex)
+	if symbol.Symbol == "^KS11" && isZeroVolumeMacroRow(quote, todayIndex) && previousIndex >= 0 {
+		repairedIndex := previousCloseIndex(quote.Close, previousIndex)
+		if repairedIndex >= 0 {
+			return repairedIndex
+		}
 	}
-	return tradeDate
+	return previousIndex
+}
+
+func isZeroVolumeMacroRow(quote dailyQuote, index int) bool {
+	return index >= 0 && index < len(quote.Volume) && quote.Volume[index] != nil && *quote.Volume[index] == 0
+}
+
+func macroTradeDate(symbol macroMarketSymbol, timestamp int64) time.Time {
+	return dateOnly(time.Unix(timestamp, 0))
 }
 
 func ensureMacroMarketDailyTable(ctx context.Context, db *sql.DB) error {
