@@ -1258,47 +1258,20 @@ func QueryVolumeStocks(ctx context.Context, db *sql.DB, req *http.Request) (Stoc
 
 func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeStockRow) string {
 	var builder strings.Builder
-	title := stockPoolTitle(pool)
-	query := req.URL.Query()
-	fmt.Fprintf(&builder, "# %s基本面初筛\n\n", title)
-	builder.WriteString("下面是我的 A 股技术形态股票池，请你只做基本面和事件风险初筛，不要给买卖建议。\n\n")
 	builder.WriteString("1、帮我把这些标的物做筛选，唯一判断是优质资产、基本面良好的划分为A类\n")
 	builder.WriteString("2、A类里面，估值严重超标，透支未来2-3年溢价的，从A类里面拿出来，分到B类\n")
 	builder.WriteString("3、基本面明显不行的，分到C类\n")
 	builder.WriteString("每个标的物都需要一个简单总结，这次不用分类分段，全部标的作为一个 list 一起给我，分类列放在第一列。\n\n")
-	builder.WriteString("## 筛选条件\n\n")
-	fmt.Fprintf(&builder, "- 股票池：%s\n", title)
-	fmt.Fprintf(&builder, "- 开始日期：%s\n", valueOrDash(query.Get("start")))
-	fmt.Fprintf(&builder, "- 结束日期：%s\n", valueOrDash(query.Get("end")))
-	fmt.Fprintf(&builder, "- 最小成交额：%s\n", amountFilterLabel(query.Get("min_amount")))
-	fmt.Fprintf(&builder, "- 最大成交额：%s\n", amountFilterLabel(query.Get("max_amount")))
-	fmt.Fprintf(&builder, "- 只看标星：%s\n", yesNo(query.Get("starred") == "1"))
-	fmt.Fprintf(&builder, "- 只看GPT星：%s\n", yesNo(query.Get("gpt_starred") == "1"))
-	fmt.Fprintf(&builder, "- 当前导出数量：%d\n\n", len(rows))
-	builder.WriteString("## 输出格式要求\n\n")
-	builder.WriteString("请用表格输出：评级、股票代码、名称、行业、基本面摘要。\n\n")
-	builder.WriteString("## 股票列表\n\n")
 	if len(rows) == 0 {
-		builder.WriteString("当前筛选条件下没有股票。\n")
+		builder.WriteString("当前没有股票。\n")
 		return builder.String()
 	}
-	writeStockPoolExportTable(&builder, pool, title, rows)
+	writeStockPoolExportTable(&builder, rows)
 	return builder.String()
 }
 
-func writeStockPoolExportTable(builder *strings.Builder, pool string, title string, rows []VolumeStockRow) {
-	headers := []string{
-		"序号", "股票代码", "名称", "行业", "股票池", "入池时间", "当前GPT星", "雪球链接",
-		"收盘价", "最高价", "最低价", riseLabel(pool), "成交额(亿)", metricLabel(pool),
-	}
-	if pool == "breakout" {
-		headers = append(headers, "前高价", "前高日成交量", "前高日期")
-	}
-	if pool == "shadow" {
-		headers = append(headers, "首次覆盖价", "首次覆盖时间", "最新覆盖价", "最新覆盖时间")
-	}
-	headers = append(headers, "入池原因")
-
+func writeStockPoolExportTable(builder *strings.Builder, rows []VolumeStockRow) {
+	headers := []string{"序号", "股票代码", "名称", "行业"}
 	writeMarkdownRow(builder, headers)
 	writeMarkdownSeparator(builder, len(headers))
 	for index, row := range rows {
@@ -1307,33 +1280,7 @@ func writeStockPoolExportTable(builder *strings.Builder, pool string, title stri
 			row.StockCode,
 			row.StockName,
 			valueOrDash(row.SectorName),
-			title,
-			valueOrDash(row.GmtCreate),
-			yesNo(row.GPTStar == 1),
-			xueqiuURL(row.StockCode),
-			fmt.Sprintf("%.2f", row.ClosePrice),
-			fmt.Sprintf("%.2f", row.MaxPrice),
-			fmt.Sprintf("%.2f", row.MinPrice),
-			fmt.Sprintf("%.2f%%", row.Rise),
-			fmt.Sprintf("%.2f", row.Amount/100000000),
-			fmt.Sprintf("%.2f%s", row.Vol, metricSuffix(pool)),
 		}
-		if pool == "breakout" {
-			values = append(values,
-				fmt.Sprintf("%.2f", row.BeforeMaxPrice),
-				fmt.Sprintf("%.0f", row.BeforeMaxVol),
-				dateOnlyString(row.BeforeMaxTime),
-			)
-		}
-		if pool == "shadow" {
-			values = append(values,
-				priceOrDash(row.FirstCoverPrice),
-				dateOnlyString(row.FirstCoverTime),
-				priceOrDash(row.NowCoverPrice),
-				dateOnlyString(row.NowCoverTime),
-			)
-		}
-		values = append(values, stockPoolReason(pool))
 		writeMarkdownRow(builder, values)
 	}
 	builder.WriteString("\n")
