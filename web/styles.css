@@ -461,7 +461,8 @@ button:disabled {
   border-color: var(--accent);
 }
 
-#copyAIResultButton {
+#copyAIResultButton,
+#saveAILevelButton {
   min-width: 96px;
   background: #eef8f6;
   color: #0f766e;
@@ -483,12 +484,29 @@ button:disabled {
 }
 
 .ai-result-table {
-  min-width: 900px;
+  min-width: 1180px;
+}
+
+.ai-summary {
+  min-width: 360px;
+  max-width: 640px;
+  white-space: normal;
+  line-height: 1.55;
 }
 
 .ai-final {
   font-size: 18px;
   font-weight: 900;
+}
+
+.ai-final-select {
+  width: 58px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-weight: 900;
+  text-align: center;
 }
 
 .ai-level-A {
@@ -676,8 +694,7 @@ tbody tr:hover {
   border-color: #f1b4ae;
 }
 
-.star-btn,
-.gpt-star-btn {
+.star-btn {
   width: 32px;
   height: 30px;
   padding: 0;
@@ -695,16 +712,10 @@ tbody tr:hover {
   border-color: #f2d28a;
 }
 
-.gpt-star-btn {
-  font-size: 13px;
+.stock-level-cell {
+  min-width: 48px;
   font-weight: 900;
-}
-
-.gpt-star-btn:hover,
-.gpt-star-btn.active {
-  color: #0f766e;
-  background: #e5f3f1;
-  border-color: #9fd8cf;
+  text-align: center;
 }
 
 .muted {

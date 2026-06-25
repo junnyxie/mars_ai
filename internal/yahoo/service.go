@@ -55,6 +55,7 @@ type VolumeStockRow struct {
 	ID              int64   `json:"id"`
 	StockCode       string  `json:"stock_code"`
 	StockName       string  `json:"stock_name"`
+	Level           string  `json:"level"`
 	SectorID        int64   `json:"sector_id"`
 	SectorName      string  `json:"sector_name"`
 	ClosePrice      float64 `json:"close_price"`
@@ -100,6 +101,7 @@ type WatchlistStockRow struct {
 	SourceID     int64   `json:"source_id"`
 	StockCode    string  `json:"stock_code"`
 	StockName    string  `json:"stock_name"`
+	Level        string  `json:"level"`
 	SectorID     int64   `json:"sector_id"`
 	SectorName   string  `json:"sector_name"`
 	JoinTime     string  `json:"join_time"`
@@ -143,6 +145,21 @@ type updateStockPoolStartRequest struct {
 type updateStockPoolGPTStarRequest struct {
 	ID      int64 `json:"id"`
 	GPTStar int   `json:"gpt_star"`
+}
+
+type stockLevelItem struct {
+	StockCode string `json:"stock_code"`
+	Code      string `json:"code"`
+	Level     string `json:"level"`
+}
+
+type updateStockLevelsRequest struct {
+	Rows []stockLevelItem `json:"rows"`
+}
+
+type updateStockLevelsResponse struct {
+	Updated int `json:"updated"`
+	Missing int `json:"missing"`
 }
 
 func NewVolumeRunner(db *sql.DB) *VolumeRunner {
@@ -883,6 +900,7 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	mux.HandleFunc("/api/breakout-stocks", r.handleBreakoutStocks)
 	mux.HandleFunc("/api/watchlist-stocks", r.handleWatchlistStocks)
 	mux.HandleFunc("/api/stock-pool/export", r.handleExportStockPool)
+	mux.HandleFunc("/api/stocks/level", r.handleUpdateStockLevels)
 	mux.HandleFunc("/api/macro-market/day", r.handleMacroMarketDay)
 	mux.HandleFunc("/api/macro-market", r.handleMacroMarket)
 	mux.HandleFunc("/api/macro-market/preview", r.handleMacroMarketPreview)
@@ -1010,6 +1028,25 @@ func (r *VolumeRunner) handleExportStockPool(w http.ResponseWriter, req *http.Re
 	markdown := buildStockPoolExportMarkdown(pool, req, page.Rows)
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	_, _ = w.Write([]byte(markdown))
+}
+
+func (r *VolumeRunner) handleUpdateStockLevels(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload updateStockLevelsRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	result, err := UpdateStockLevels(req.Context(), r.db, payload.Rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (r *VolumeRunner) handleMacroMarketPreview(w http.ResponseWriter, req *http.Request) {
@@ -1254,6 +1291,81 @@ func (r *VolumeRunner) handleDeleteStockPoolRows(w http.ResponseWriter, req *htt
 
 func QueryVolumeStocks(ctx context.Context, db *sql.DB, req *http.Request) (StockPoolPage, error) {
 	return queryStockPoolRows(ctx, db, req, "volume_stock")
+}
+
+func UpdateStockLevels(ctx context.Context, db *sql.DB, rows []stockLevelItem) (updateStockLevelsResponse, error) {
+	if err := ensureStockLevelColumn(ctx, db); err != nil {
+		return updateStockLevelsResponse{}, err
+	}
+	if len(rows) == 0 {
+		return updateStockLevelsResponse{}, fmt.Errorf("no stock level rows")
+	}
+	result := updateStockLevelsResponse{}
+	for _, row := range rows {
+		code := strings.TrimSpace(row.StockCode)
+		if code == "" {
+			code = strings.TrimSpace(row.Code)
+		}
+		level := strings.ToUpper(strings.TrimSpace(row.Level))
+		if code == "" {
+			continue
+		}
+		if len(code) != 6 {
+			return result, fmt.Errorf("invalid stock_code: %s", code)
+		}
+		if level != "A" && level != "B" && level != "C" {
+			return result, fmt.Errorf("invalid level for %s: %s", code, level)
+		}
+		execResult, err := db.ExecContext(ctx, "UPDATE stock SET level = ?, gmt_update = CURRENT_TIMESTAMP WHERE stock_code = ?", level, code)
+		if err != nil {
+			return result, fmt.Errorf("update stock level stock_code=%s failed: %w", code, err)
+		}
+		affected, err := execResult.RowsAffected()
+		if err != nil {
+			return result, fmt.Errorf("read updated stock level rows failed: %w", err)
+		}
+		if affected == 0 {
+			result.Missing++
+			continue
+		}
+		result.Updated++
+		if err := syncWatchlistForStockCode(ctx, db, code); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func syncWatchlistForStockCode(ctx context.Context, db *sql.DB, stockCode string) error {
+	for _, table := range []string{"shadow_stock", "breakout_stock"} {
+		if err := ensureStockPoolTable(ctx, db, table); err != nil {
+			return err
+		}
+		rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s WHERE stock_code = ?", table), stockCode)
+		if err != nil {
+			return fmt.Errorf("load %s ids for stock_code=%s failed: %w", table, stockCode, err)
+		}
+		ids := make([]int64, 0)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan %s id for stock_code=%s failed: %w", table, stockCode, err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate %s ids for stock_code=%s failed: %w", table, stockCode, err)
+		}
+		rows.Close()
+		for _, id := range ids {
+			if err := SyncWatchlistFromPoolRow(ctx, db, table, id); err != nil {
+				return fmt.Errorf("sync watchlist after stock level update table=%s id=%d failed: %w", table, id, err)
+			}
+		}
+	}
+	return nil
 }
 
 func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeStockRow) string {
@@ -1617,7 +1729,15 @@ func loadWatchlistCandidateIDs(ctx context.Context, db *sql.DB, table string) ([
 	if err := ensureStockPoolTable(ctx, db, table); err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s WHERE COALESCE(`start`, 0) = 1 AND COALESCE(gpt_star, 0) = 1 ORDER BY id", table))
+	if err := ensureStockLevelColumn(ctx, db); err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+SELECT p.id
+FROM %s p
+JOIN stock s ON s.stock_code = p.stock_code
+WHERE COALESCE(p.`+"`start`"+`, 0) = 1 AND s.level IN ('A', 'B')
+ORDER BY p.id`, table))
 	if err != nil {
 		return nil, fmt.Errorf("load %s watchlist candidate ids failed: %w", table, err)
 	}
@@ -1647,6 +1767,9 @@ func SyncWatchlistFromPoolRow(ctx context.Context, db *sql.DB, table string, id 
 	if err := ensureStockPoolTable(ctx, db, table); err != nil {
 		return err
 	}
+	if err := ensureStockLevelColumn(ctx, db); err != nil {
+		return err
+	}
 	if id <= 0 {
 		return fmt.Errorf("invalid id")
 	}
@@ -1656,6 +1779,10 @@ func SyncWatchlistFromPoolRow(ctx context.Context, db *sql.DB, table string, id 
 	return syncBreakoutWatchlistRow(ctx, db, sourcePool, id)
 }
 
+func watchlistAllowedLevel(level string) bool {
+	return level == "A" || level == "B"
+}
+
 func syncShadowWatchlistRow(ctx context.Context, db *sql.DB, sourcePool string, id int64) error {
 	var row struct {
 		StockCode       string
@@ -1663,24 +1790,25 @@ func syncShadowWatchlistRow(ctx context.Context, db *sql.DB, sourcePool string, 
 		SectorID        int64
 		SectorName      sql.NullString
 		Start           int
-		GPTStar         int
+		Level           string
 		FirstCoverPrice sql.NullFloat64
 		FirstCoverTime  sql.NullTime
 		NowCoverPrice   sql.NullFloat64
 		NowCoverTime    sql.NullTime
 	}
 	err := db.QueryRowContext(ctx, `
-SELECT stock_code, stock_name, sector_id, sector_name, COALESCE(`+"`start`"+`, 0), COALESCE(gpt_star, 0),
-       first_cover_price, first_cover_time, now_cover_price, now_cover_time
-FROM shadow_stock
-WHERE id = ?`, id).Scan(&row.StockCode, &row.StockName, &row.SectorID, &row.SectorName, &row.Start, &row.GPTStar, &row.FirstCoverPrice, &row.FirstCoverTime, &row.NowCoverPrice, &row.NowCoverTime)
+SELECT p.stock_code, p.stock_name, p.sector_id, p.sector_name, COALESCE(p.`+"`start`"+`, 0), COALESCE(s.level, ''),
+       p.first_cover_price, p.first_cover_time, p.now_cover_price, p.now_cover_time
+FROM shadow_stock p
+LEFT JOIN stock s ON s.stock_code = p.stock_code
+WHERE p.id = ?`, id).Scan(&row.StockCode, &row.StockName, &row.SectorID, &row.SectorName, &row.Start, &row.Level, &row.FirstCoverPrice, &row.FirstCoverTime, &row.NowCoverPrice, &row.NowCoverTime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deleteWatchlistBySource(ctx, db, sourcePool, id)
 	}
 	if err != nil {
 		return fmt.Errorf("load shadow_stock id=%d for watchlist failed: %w", id, err)
 	}
-	if row.Start != 1 || row.GPTStar != 1 || !row.FirstCoverPrice.Valid || !row.FirstCoverTime.Valid {
+	if row.Start != 1 || !watchlistAllowedLevel(row.Level) || !row.FirstCoverPrice.Valid || !row.FirstCoverTime.Valid {
 		return deleteWatchlistBySource(ctx, db, sourcePool, id)
 	}
 	return upsertWatchlistRow(ctx, db, sourcePool, id, row.StockCode, row.StockName, row.SectorID, row.SectorName, row.FirstCoverTime.Time, row.FirstCoverPrice.Float64)
@@ -1694,20 +1822,21 @@ func syncBreakoutWatchlistRow(ctx context.Context, db *sql.DB, sourcePool string
 		SectorName sql.NullString
 		ClosePrice float64
 		Start      int
-		GPTStar    int
+		Level      string
 		GmtCreate  time.Time
 	}
 	err := db.QueryRowContext(ctx, `
-SELECT stock_code, stock_name, sector_id, sector_name, COALESCE(close_price, 0), COALESCE(`+"`start`"+`, 0), COALESCE(gpt_star, 0), gmt_create
-FROM breakout_stock
-WHERE id = ?`, id).Scan(&row.StockCode, &row.StockName, &row.SectorID, &row.SectorName, &row.ClosePrice, &row.Start, &row.GPTStar, &row.GmtCreate)
+SELECT p.stock_code, p.stock_name, p.sector_id, p.sector_name, COALESCE(p.close_price, 0), COALESCE(p.`+"`start`"+`, 0), COALESCE(s.level, ''), p.gmt_create
+FROM breakout_stock p
+LEFT JOIN stock s ON s.stock_code = p.stock_code
+WHERE p.id = ?`, id).Scan(&row.StockCode, &row.StockName, &row.SectorID, &row.SectorName, &row.ClosePrice, &row.Start, &row.Level, &row.GmtCreate)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deleteWatchlistBySource(ctx, db, sourcePool, id)
 	}
 	if err != nil {
 		return fmt.Errorf("load breakout_stock id=%d for watchlist failed: %w", id, err)
 	}
-	if row.Start != 1 || row.GPTStar != 1 || row.ClosePrice <= 0 {
+	if row.Start != 1 || !watchlistAllowedLevel(row.Level) || row.ClosePrice <= 0 {
 		return deleteWatchlistBySource(ctx, db, sourcePool, id)
 	}
 	return upsertWatchlistRow(ctx, db, sourcePool, id, row.StockCode, row.StockName, row.SectorID, row.SectorName, row.GmtCreate, row.ClosePrice)
@@ -1886,6 +2015,9 @@ func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (Wat
 	if err := ensureWatchlistStockTable(ctx, db); err != nil {
 		return WatchlistStockPage{}, err
 	}
+	if err := ensureStockLevelColumn(ctx, db); err != nil {
+		return WatchlistStockPage{}, err
+	}
 	query := req.URL.Query()
 	startDate := query.Get("start")
 	endDate := query.Get("end")
@@ -1914,33 +2046,34 @@ func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (Wat
 	args := []any{}
 	where := "WHERE 1=1"
 	if startDate != "" {
-		where += " AND join_time >= ?"
+		where += " AND ws.join_time >= ?"
 		args = append(args, startDate+" 00:00:00")
 	}
 	if endDate != "" {
-		where += " AND join_time <= ?"
+		where += " AND ws.join_time <= ?"
 		args = append(args, endDate+" 23:59:59")
 	}
 	if sourcePool != "" {
 		if sourcePool != "shadow" && sourcePool != "breakout" {
 			return WatchlistStockPage{}, fmt.Errorf("invalid source_pool")
 		}
-		where += " AND source_pool = ?"
+		where += " AND ws.source_pool = ?"
 		args = append(args, sourcePool)
 	}
 
 	var total int
-	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM watchlist_stock %s", where), args...).Scan(&total); err != nil {
+	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM watchlist_stock ws LEFT JOIN stock s ON s.stock_code = ws.stock_code %s", where), args...).Scan(&total); err != nil {
 		return WatchlistStockPage{}, fmt.Errorf("count watchlist_stock failed: %w", err)
 	}
 	offset := (page - 1) * pageSize
 	args = append(args, pageSize, offset)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-SELECT id, source_pool, source_id, stock_code, stock_name, sector_id, COALESCE(sector_name, ''),
-       DATE_FORMAT(join_time, '%%Y-%%m-%%d %%H:%%i:%%s'), COALESCE(join_price, 0),
-       COALESCE(current_price, 0), COALESCE(DATE_FORMAT(`+"`current_time`"+`, '%%Y-%%m-%%d %%H:%%i:%%s'), ''),
-       COALESCE(rise, 0), DATE_FORMAT(gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
-FROM watchlist_stock
+SELECT ws.id, ws.source_pool, ws.source_id, ws.stock_code, ws.stock_name, COALESCE(s.level, ''), ws.sector_id, COALESCE(ws.sector_name, ''),
+       DATE_FORMAT(ws.join_time, '%%Y-%%m-%%d %%H:%%i:%%s'), COALESCE(ws.join_price, 0),
+       COALESCE(ws.current_price, 0), COALESCE(DATE_FORMAT(ws.`+"`current_time`"+`, '%%Y-%%m-%%d %%H:%%i:%%s'), ''),
+       COALESCE(ws.rise, 0), DATE_FORMAT(ws.gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
+FROM watchlist_stock ws
+LEFT JOIN stock s ON s.stock_code = ws.stock_code
 %s
 ORDER BY %s %s
 LIMIT ? OFFSET ?`, where, sortField, sortDir), args...)
@@ -1958,6 +2091,7 @@ LIMIT ? OFFSET ?`, where, sortField, sortDir), args...)
 			&row.SourceID,
 			&row.StockCode,
 			&row.StockName,
+			&row.Level,
 			&row.SectorID,
 			&row.SectorName,
 			&row.JoinTime,
@@ -1980,25 +2114,27 @@ LIMIT ? OFFSET ?`, where, sortField, sortDir), args...)
 func allowedWatchlistSortField(field string) string {
 	switch field {
 	case "source_pool":
-		return "source_pool"
+		return "ws.source_pool"
 	case "stock_code":
-		return "stock_code"
+		return "ws.stock_code"
 	case "stock_name":
-		return "stock_name"
+		return "ws.stock_name"
+	case "level":
+		return "s.level"
 	case "sector_name":
-		return "sector_name"
+		return "ws.sector_name"
 	case "join_time":
-		return "join_time"
+		return "ws.join_time"
 	case "join_price":
-		return "join_price"
+		return "ws.join_price"
 	case "current_price":
-		return "current_price"
+		return "ws.current_price"
 	case "current_time":
-		return "`current_time`"
+		return "ws.`current_time`"
 	case "rise":
-		return "rise"
+		return "ws.rise"
 	default:
-		return "join_time"
+		return "ws.join_time"
 	}
 }
 
@@ -2009,6 +2145,9 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	if err := ensureStockPoolTable(ctx, db, table); err != nil {
 		return StockPoolPage{}, err
 	}
+	if err := ensureStockLevelColumn(ctx, db); err != nil {
+		return StockPoolPage{}, err
+	}
 	query := req.URL.Query()
 	startDate := query.Get("start")
 	endDate := query.Get("end")
@@ -2016,7 +2155,6 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	maxAmount := query.Get("max_amount")
 	coverBelow := query.Get("cover_below")
 	starred := query.Get("starred")
-	gptStarred := query.Get("gpt_starred")
 	sortField := allowedSortField(table, query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -2042,11 +2180,11 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	args := []any{}
 	where := "WHERE 1=1"
 	if startDate != "" {
-		where += " AND gmt_create >= ?"
+		where += " AND p.gmt_create >= ?"
 		args = append(args, startDate+" 00:00:00")
 	}
 	if endDate != "" {
-		where += " AND gmt_create <= ?"
+		where += " AND p.gmt_create <= ?"
 		args = append(args, endDate+" 23:59:59")
 	}
 	if minAmount != "" {
@@ -2054,7 +2192,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 		if err != nil || parsed < 0 {
 			return StockPoolPage{}, fmt.Errorf("invalid min_amount")
 		}
-		where += " AND amount >= ?"
+		where += " AND p.amount >= ?"
 		args = append(args, parsed)
 	}
 	if maxAmount != "" {
@@ -2062,22 +2200,19 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 		if err != nil || parsed < 0 {
 			return StockPoolPage{}, fmt.Errorf("invalid max_amount")
 		}
-		where += " AND amount <= ?"
+		where += " AND p.amount <= ?"
 		args = append(args, parsed)
 	}
 	if coverBelow == "1" {
 		if table != "shadow_stock" {
 			return StockPoolPage{}, fmt.Errorf("cover_below only supports shadow_stock")
 		}
-		where += " AND first_cover_price IS NOT NULL AND now_cover_price IS NOT NULL AND now_cover_price >= first_cover_price"
+		where += " AND p.first_cover_price IS NOT NULL AND p.now_cover_price IS NOT NULL AND p.now_cover_price >= p.first_cover_price"
 	}
 	if starred == "1" {
-		where += " AND COALESCE(`start`, 0) = 1"
+		where += " AND COALESCE(p.`start`, 0) = 1"
 	}
-	if gptStarred == "1" {
-		where += " AND COALESCE(gpt_star, 0) = 1"
-	}
-	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s %s", table, where)
+	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s p LEFT JOIN stock s ON s.stock_code = p.stock_code %s", table, where)
 	countArgs := append([]any(nil), args...)
 	var total int
 	if err := db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total); err != nil {
@@ -2090,13 +2225,14 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	coverFields := rowCoverFields(table)
 	breakoutFields := rowBreakoutFields(table)
 	sqlText := fmt.Sprintf(`
-SELECT id, stock_code, stock_name, sector_id, COALESCE(sector_name, ''),
-       COALESCE(close_price, 0), COALESCE(max_price, 0), COALESCE(min_price, 0),
-       COALESCE(%s, 0), COALESCE(amount, 0), COALESCE(%s, 0), COALESCE(`+"`start`"+`, 0), COALESCE(gpt_star, 0),
+SELECT p.id, p.stock_code, p.stock_name, COALESCE(s.level, ''), p.sector_id, COALESCE(p.sector_name, ''),
+       COALESCE(p.close_price, 0), COALESCE(p.max_price, 0), COALESCE(p.min_price, 0),
+       COALESCE(%s, 0), COALESCE(p.amount, 0), COALESCE(%s, 0), COALESCE(p.`+"`start`"+`, 0), COALESCE(p.gpt_star, 0),
        %s,
        %s,
-       DATE_FORMAT(gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
-FROM %s
+       DATE_FORMAT(p.gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
+FROM %s p
+LEFT JOIN stock s ON s.stock_code = p.stock_code
 %s
 ORDER BY %s %s
 LIMIT ? OFFSET ?`, riseField, volField, breakoutFields, coverFields, table, where, sortField, sortDir)
@@ -2114,6 +2250,7 @@ LIMIT ? OFFSET ?`, riseField, volField, breakoutFields, coverFields, table, wher
 			&row.ID,
 			&row.StockCode,
 			&row.StockName,
+			&row.Level,
 			&row.SectorID,
 			&row.SectorName,
 			&row.ClosePrice,
@@ -2145,74 +2282,76 @@ LIMIT ? OFFSET ?`, riseField, volField, breakoutFields, coverFields, table, wher
 
 func rowCoverFields(table string) string {
 	if table == "shadow_stock" {
-		return "COALESCE(first_cover_price, 0), COALESCE(DATE_FORMAT(first_cover_time, '%Y-%m-%d %H:%i:%s'), ''), COALESCE(now_cover_price, 0), COALESCE(DATE_FORMAT(now_cover_time, '%Y-%m-%d %H:%i:%s'), '')"
+		return "COALESCE(p.first_cover_price, 0), COALESCE(DATE_FORMAT(p.first_cover_time, '%Y-%m-%d %H:%i:%s'), ''), COALESCE(p.now_cover_price, 0), COALESCE(DATE_FORMAT(p.now_cover_time, '%Y-%m-%d %H:%i:%s'), '')"
 	}
 	return "0, '', 0, ''"
 }
 
 func rowBreakoutFields(table string) string {
 	if table == "breakout_stock" {
-		return "COALESCE(before_max_price, 0), COALESCE(before_max_vol, 0), COALESCE(DATE_FORMAT(before_max_time, '%Y-%m-%d %H:%i:%s'), '')"
+		return "COALESCE(p.before_max_price, 0), COALESCE(p.before_max_vol, 0), COALESCE(DATE_FORMAT(p.before_max_time, '%Y-%m-%d %H:%i:%s'), '')"
 	}
 	return "0, 0, ''"
 }
 
 func rowMetricFields(table string) (string, string) {
 	if table == "shadow_stock" {
-		return "raise_rate", "high_rate"
+		return "p.raise_rate", "p.high_rate"
 	}
-	return "rise", "vol"
+	return "p.rise", "p.vol"
 }
 
 func allowedSortField(table string, field string) string {
 	switch field {
 	case "stock_code":
-		return "stock_code"
+		return "p.stock_code"
 	case "stock_name":
-		return "stock_name"
+		return "p.stock_name"
+	case "level":
+		return "s.level"
 	case "sector_name":
-		return "sector_name"
+		return "p.sector_name"
 	case "close_price":
-		return "close_price"
+		return "p.close_price"
 	case "max_price":
-		return "max_price"
+		return "p.max_price"
 	case "min_price":
-		return "min_price"
+		return "p.min_price"
 	case "rise":
 		if table == "shadow_stock" {
-			return "raise_rate"
+			return "p.raise_rate"
 		}
-		return "rise"
+		return "p.rise"
 	case "amount":
-		return "amount"
+		return "p.amount"
 	case "vol":
 		if table == "shadow_stock" {
-			return "high_rate"
+			return "p.high_rate"
 		}
-		return "vol"
+		return "p.vol"
 	case "before_max_price":
 		if table == "breakout_stock" {
-			return "before_max_price"
+			return "p.before_max_price"
 		}
-		return "gmt_create"
+		return "p.gmt_create"
 	case "before_max_vol":
 		if table == "breakout_stock" {
-			return "before_max_vol"
+			return "p.before_max_vol"
 		}
-		return "gmt_create"
+		return "p.gmt_create"
 	case "before_max_time":
 		if table == "breakout_stock" {
-			return "before_max_time"
+			return "p.before_max_time"
 		}
-		return "gmt_create"
+		return "p.gmt_create"
 	case "start":
-		return "`start`"
+		return "p.`start`"
 	case "gpt_star":
-		return "gpt_star"
+		return "p.gpt_star"
 	case "gmt_create":
-		return "gmt_create"
+		return "p.gmt_create"
 	default:
-		return "gmt_create"
+		return "p.gmt_create"
 	}
 }
 
@@ -2524,6 +2663,10 @@ func ensureStockPoolGPTStarColumn(ctx context.Context, db *sql.DB, table string)
 		return fmt.Errorf("invalid stock pool table")
 	}
 	return ensureTableColumn(ctx, db, table, "gpt_star", fmt.Sprintf("ALTER TABLE %s ADD COLUMN gpt_star INT NOT NULL DEFAULT 0 COMMENT 'GPT分析标星'", table))
+}
+
+func ensureStockLevelColumn(ctx context.Context, db *sql.DB) error {
+	return ensureTableColumn(ctx, db, "stock", "level", "ALTER TABLE stock ADD COLUMN level VARCHAR(10) DEFAULT NULL COMMENT 'AI基本面分类'")
 }
 
 func ensureTableColumn(ctx context.Context, db *sql.DB, table string, column string, alterSQL string) error {

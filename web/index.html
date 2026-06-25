@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>股票池监控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260625-5" />
+  <link rel="stylesheet" href="/styles.css?v=20260625-10" />
 </head>
 <body>
   <div class="app-shell">
@@ -46,10 +46,6 @@
         <label class="star-filter">
           只看标星
           <input id="starredOnly" type="checkbox" />
-        </label>
-        <label class="star-filter">
-          只看GPT星
-          <input id="gptStarredOnly" type="checkbox" />
         </label>
         <label>每页显示
           <select id="pageSize">
@@ -105,6 +101,7 @@
         </div>
         <div class="ai-actions">
           <button id="mergeAIButton" type="button">汇总评级</button>
+          <button id="saveAILevelButton" type="button">写入stock分类</button>
           <button id="copyAIResultButton" type="button">复制结果</button>
           <span id="aiMergeHint">-</span>
         </div>
@@ -118,7 +115,9 @@
                 <th>元宝</th>
                 <th>ChatGPT</th>
                 <th>最终分类</th>
+                <th>A命中数</th>
                 <th>规则命中</th>
+                <th>合并总结</th>
               </tr>
             </thead>
             <tbody id="aiMergeRows"></tbody>
@@ -132,7 +131,7 @@
             <tr>
               <th class="select-col"><input id="selectAllRows" type="checkbox" aria-label="全选当前页" /></th>
               <th data-sort="start" class="star-col pool-only">星标 <span class="sort-arrow"></span></th>
-              <th data-sort="gpt_star" class="star-col pool-only">GPT星 <span class="sort-arrow"></span></th>
+              <th data-sort="level">分类 <span class="sort-arrow"></span></th>
               <th data-sort="stock_code">代码 <span class="sort-arrow"></span></th>
               <th data-sort="stock_name">名称 <span class="sort-arrow"></span></th>
               <th data-sort="sector_name">行业 <span class="sort-arrow"></span></th>
@@ -170,6 +169,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260625-5"></script>
+  <script src="/app.js?v=20260625-10"></script>
 </body>
 </html>

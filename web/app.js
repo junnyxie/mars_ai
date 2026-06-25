@@ -10,7 +10,6 @@ const minAmountEl = document.querySelector("#minAmount");
 const maxAmountInputEl = document.querySelector("#maxAmountInput");
 const coverBelowEl = document.querySelector("#coverBelow");
 const starredOnlyEl = document.querySelector("#starredOnly");
-const gptStarredOnlyEl = document.querySelector("#gptStarredOnly");
 const pageSizeEl = document.querySelector("#pageSize");
 const prevPageEl = document.querySelector("#prevPage");
 const nextPageEl = document.querySelector("#nextPage");
@@ -41,6 +40,7 @@ const qwenTextEl = document.querySelector("#qwenText");
 const yuanbaoTextEl = document.querySelector("#yuanbaoText");
 const chatgptTextEl = document.querySelector("#chatgptText");
 const mergeAIButton = document.querySelector("#mergeAIButton");
+const saveAILevelButton = document.querySelector("#saveAILevelButton");
 const copyAIResultButton = document.querySelector("#copyAIResultButton");
 const aiMergeHintEl = document.querySelector("#aiMergeHint");
 const aiMergeRowsEl = document.querySelector("#aiMergeRows");
@@ -52,7 +52,6 @@ const pools = {
     api: "/api/volume-stocks",
     deleteApi: "/api/volume-stocks/delete",
     startApi: "/api/volume-stocks/start",
-    gptStarApi: "/api/volume-stocks/gpt-star",
     riseLabel: "涨跌幅",
     metricLabel: "量比",
     maxMetricLabel: "最高量比",
@@ -65,7 +64,6 @@ const pools = {
     deleteApi: "/api/shadow-stocks/delete",
     coverApi: "/api/shadow-stocks/cover",
     startApi: "/api/shadow-stocks/start",
-    gptStarApi: "/api/shadow-stocks/gpt-star",
     riseLabel: "收盘涨幅",
     metricLabel: "最高价涨幅",
     maxMetricLabel: "最高价涨幅",
@@ -77,7 +75,6 @@ const pools = {
     api: "/api/breakout-stocks",
     deleteApi: "/api/breakout-stocks/delete",
     startApi: "/api/breakout-stocks/start",
-    gptStarApi: "/api/breakout-stocks/gpt-star",
     riseLabel: "涨跌幅",
     metricLabel: "量能接近度",
     maxMetricLabel: "最高量能比",
@@ -85,7 +82,7 @@ const pools = {
   },
   watchlist: {
     title: "监控股票池",
-    desc: "手动标星和GPT标星同时满足后加入，跟踪加入后的实时价格表现",
+    desc: "手动标星且分类为A后加入，跟踪加入后的实时价格表现",
     api: "/api/watchlist-stocks",
     deleteApi: "/api/watchlist-stocks/delete",
     refreshApi: "/api/watchlist-stocks/refresh",
@@ -188,7 +185,6 @@ function buildQueryParams() {
   if (maxAmountInputEl.value !== "") params.set("max_amount", amountYiToRaw(maxAmountInputEl.value));
   if (currentPool === "shadow" && coverBelowEl.checked) params.set("cover_below", "1");
   if (starredOnlyEl.checked) params.set("starred", "1");
-  if (gptStarredOnlyEl.checked) params.set("gpt_starred", "1");
   return params;
 }
 
@@ -263,7 +259,7 @@ function render(rows, poolName) {
     <tr>
       <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
       <td class="star-col"><button class="star-btn ${toNumber(row.start) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-start="${toNumber(row.start) === 1 ? 1 : 0}" aria-label="标星 ${row.stock_code}">★</button></td>
-      <td class="star-col"><button class="gpt-star-btn ${toNumber(row.gpt_star) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-gpt-star="${toNumber(row.gpt_star) === 1 ? 1 : 0}" aria-label="GPT标星 ${row.stock_code}">G</button></td>
+      <td class="stock-level-cell ai-level-${row.level || "empty"}">${row.level || "-"}</td>
       <td class="code-cell">${stockCodeCell(row)}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
@@ -307,7 +303,7 @@ function renderWatchlist(rows) {
     <tr>
       <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
       <td class="star-col pool-only"></td>
-      <td class="star-col pool-only"></td>
+      <td class="stock-level-cell ai-level-${row.level || "empty"}">${row.level || "-"}</td>
       <td class="code-cell">${stockCodeCell(row)}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
@@ -412,11 +408,6 @@ starredOnlyEl.addEventListener("change", () => {
   loadRows();
 });
 
-gptStarredOnlyEl.addEventListener("change", () => {
-  currentPage = 1;
-  loadRows();
-});
-
 menuEl.addEventListener("click", event => {
   const item = event.target.closest(".menu-item");
   if (!item) return;
@@ -497,21 +488,53 @@ copyAIResultButton.addEventListener("click", async () => {
   }
 });
 
+saveAILevelButton.addEventListener("click", async () => {
+  if (!aiMergeResult.length) {
+    renderAIMerge();
+  }
+  if (!aiMergeResult.length) {
+    setAIMergeHint("没有可写入的分类结果");
+    return;
+  }
+  if (!window.confirm(`确认把 ${aiMergeResult.length} 条最终分类写入 stock 基表？`)) return;
+  saveAILevelButton.disabled = true;
+  setAIMergeHint("写入中");
+  try {
+    const rows = aiMergeResult.map(row => ({
+      stock_code: row.code,
+      level: row.finalLevel
+    }));
+    const res = await fetch("/api/stocks/level", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const result = await res.json();
+    setAIMergeHint(`已写入 ${toNumber(result.updated)} 条，未匹配 ${toNumber(result.missing)} 条`);
+  } catch (err) {
+    setAIMergeHint(err.message);
+  } finally {
+    saveAILevelButton.disabled = false;
+  }
+});
+
 rowsEl.addEventListener("change", event => {
   if (event.target.classList.contains("row-check")) {
     updateSelectionState();
   }
 });
 
+aiMergeRowsEl.addEventListener("change", event => {
+  const select = event.target.closest(".ai-final-select");
+  if (!select) return;
+  updateAIMergeLevel(select.dataset.code, select.value);
+});
+
 rowsEl.addEventListener("click", event => {
   const starButton = event.target.closest(".star-btn");
   if (starButton) {
     toggleStart(starButton);
-    return;
-  }
-  const gptStarButton = event.target.closest(".gpt-star-btn");
-  if (gptStarButton) {
-    toggleGPTStar(gptStarButton);
     return;
   }
   const button = event.target.closest(".row-delete");
@@ -633,35 +656,6 @@ async function toggleStart(button) {
   }
 }
 
-async function toggleGPTStar(button) {
-  const id = toNumber(button.dataset.id);
-  if (!id) return;
-  const nextStar = toNumber(button.dataset.gptStar) === 1 ? 0 : 1;
-  const previousStar = toNumber(button.dataset.gptStar) === 1 ? 1 : 0;
-  button.disabled = true;
-  button.dataset.gptStar = String(nextStar);
-  button.classList.toggle("active", nextStar === 1);
-  setStatus("Saving");
-  try {
-    const res = await fetch(pools[currentPool].gptStarApi, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, gpt_star: nextStar })
-    });
-    if (!res.ok) throw new Error(await res.text());
-    setStatus("Ready");
-    if (gptStarredOnlyEl.checked && nextStar === 0) {
-      await loadRows();
-    }
-  } catch (err) {
-    button.dataset.gptStar = String(previousStar);
-    button.classList.toggle("active", previousStar === 1);
-    setStatus(err.message);
-  } finally {
-    button.disabled = false;
-  }
-}
-
 async function exportForChatGPT() {
   const params = buildQueryParams();
   params.set("pool", currentPool);
@@ -710,15 +704,19 @@ function renderAIMerge() {
       yuanbao: yuanbaoItem.level || "",
       chatgpt: chatgptItem.level || ""
     };
+    const items = { qwen: qwenItem, yuanbao: yuanbaoItem, chatgpt: chatgptItem };
     const merged = mergeAILevels(levels);
     return {
       code,
       name: qwenItem.name || yuanbaoItem.name || chatgptItem.name || "",
+      items,
       qwen: levels.qwen,
       yuanbao: levels.yuanbao,
       chatgpt: levels.chatgpt,
+      aCount: Object.values(levels).filter(level => level === "A").length,
       finalLevel: merged.level,
-      reason: merged.reason
+      reason: merged.reason,
+      summary: buildMergedAISummary(items, merged.level)
     };
   });
   renderAIMergeRows(aiMergeResult);
@@ -726,9 +724,54 @@ function renderAIMerge() {
 
 function parseAIRatingText(text) {
 	const result = new Map();
+	const value = String(text || "").replace(/\r/g, "");
+	parseStructuredAIRatingRows(value, result);
+	parseNaturalAIRatingRows(value, result);
+	return result;
+}
+
+function parseStructuredAIRatingRows(text, result) {
+	const lines = String(text || "")
+		.split("\n")
+		.map(line => line.trim())
+		.filter(Boolean);
+	let markdownHeader = null;
+	let csvHeader = null;
+	let tabHeader = null;
+	for (const line of lines) {
+		if (line.startsWith("|") && line.includes("|")) {
+			const cells = splitMarkdownCells(line);
+			if (isMarkdownSeparator(cells)) continue;
+			if (looksLikeAIRatingHeader(cells)) {
+				markdownHeader = cells;
+				continue;
+			}
+			if (markdownHeader) appendStructuredAIRating(result, markdownHeader, cells);
+			continue;
+		}
+		if (line.includes("\t")) {
+			const cells = line.split("\t").map(cell => cleanAICell(cell));
+			if (looksLikeAIRatingHeader(cells)) {
+				tabHeader = cells;
+				continue;
+			}
+			if (tabHeader) appendStructuredAIRating(result, tabHeader, cells);
+			continue;
+		}
+		if (line.includes(",")) {
+			const cells = splitCSVLine(line).map(cell => cleanAICell(cell));
+			if (looksLikeAIRatingHeader(cells)) {
+				csvHeader = cells;
+				continue;
+			}
+			if (csvHeader) appendStructuredAIRating(result, csvHeader, cells);
+		}
+	}
+}
+
+function parseNaturalAIRatingRows(text, result) {
 	let currentLevel = "";
 	const lines = String(text || "")
-		.replace(/\r/g, "")
 		.split("\n")
 		.map(line => line.trim())
 		.filter(Boolean);
@@ -746,13 +789,93 @@ function parseAIRatingText(text) {
 			const next = {
 				code,
 				name: extractStockName(line, code),
-				level
+				level,
+				summary: cleanAISummary(line)
 			};
 			const previous = result.get(code);
 			result.set(code, mergeSameModelRating(previous, next));
 		}
 	}
-	return result;
+}
+
+function splitMarkdownCells(line) {
+	return String(line || "")
+		.replace(/^\|/, "")
+		.replace(/\|$/, "")
+		.split("|")
+		.map(cell => cleanAICell(cell));
+}
+
+function splitCSVLine(line) {
+	const cells = [];
+	let current = "";
+	let inQuotes = false;
+	const value = String(line || "");
+	for (let index = 0; index < value.length; index += 1) {
+		const char = value[index];
+		if (char === "\"") {
+			if (inQuotes && value[index + 1] === "\"") {
+				current += "\"";
+				index += 1;
+			} else {
+				inQuotes = !inQuotes;
+			}
+			continue;
+		}
+		if (char === "," && !inQuotes) {
+			cells.push(cleanAICell(current));
+			current = "";
+			continue;
+		}
+		current += char;
+	}
+	cells.push(cleanAICell(current));
+	return cells;
+}
+
+function isMarkdownSeparator(cells) {
+	return cells.length > 0 && cells.every(cell => /^:?-{2,}:?$/.test(cell));
+}
+
+function cleanAICell(value) {
+	return String(value || "")
+		.replace(/^["'“”]+|["'“”]+$/g, "")
+		.trim();
+}
+
+function normalizeAIHeader(value) {
+	return cleanAICell(value)
+		.replace(/\s/g, "")
+		.replace(/[：:]/g, "");
+}
+
+function looksLikeAIRatingHeader(cells) {
+	return findAIColumnIndex(cells, ["分类", "评级", "类别"]) >= 0 &&
+		findAIColumnIndex(cells, ["股票代码", "代码", "证券代码"]) >= 0;
+}
+
+function findAIColumnIndex(headers, candidates) {
+	const normalizedCandidates = candidates.map(candidate => normalizeAIHeader(candidate));
+	return headers.findIndex(header => normalizedCandidates.includes(normalizeAIHeader(header)));
+}
+
+function appendStructuredAIRating(result, headers, cells) {
+	const levelIndex = findAIColumnIndex(headers, ["分类", "评级", "类别"]);
+	const codeIndex = findAIColumnIndex(headers, ["股票代码", "代码", "证券代码"]);
+	const nameIndex = findAIColumnIndex(headers, ["名称", "股票名称", "证券名称"]);
+	const summaryIndex = findAIColumnIndex(headers, ["简单总结", "基本面摘要", "一句话总结", "总结", "摘要", "理由", "结论"]);
+	if (levelIndex < 0 || codeIndex < 0) return;
+	const codeMatch = cleanAICell(cells[codeIndex]).match(/\b(\d{6})\b/);
+	const level = extractAILevel(cells[levelIndex] || "");
+	if (!codeMatch || !level) return;
+	const next = {
+		code: codeMatch[1],
+		name: nameIndex >= 0 ? cleanAICell(cells[nameIndex]) : "",
+		level,
+		summary: summaryIndex >= 0 ? cleanAISummary(cells[summaryIndex]) : ""
+	};
+	const previous = result.get(next.code);
+	result.set(next.code, mergeSameModelRating(previous, next));
 }
 
 function extractAIHeadingLevel(text) {
@@ -794,13 +917,24 @@ function mergeSameModelRating(previous, next) {
 	if (nextRank > previousRank) {
 		return {
 			...next,
-			name: previous.name || next.name
+			name: previous.name || next.name,
+			summary: next.summary || previous.summary
 		};
 	}
 	return {
 		...previous,
-		name: previous.name || next.name
+		name: previous.name || next.name,
+		summary: previous.summary || next.summary
 	};
+}
+
+function cleanAISummary(text) {
+	return String(text || "")
+		.replace(/^\|/, "")
+		.replace(/\|$/, "")
+		.replace(/^\s*[-*]\s*/, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function extractStockName(text, code) {
@@ -831,18 +965,43 @@ function mergeAILevels(levels) {
   return { level: "A", reason: "至少一个A，且没有C" };
 }
 
+function buildMergedAISummary(items, finalLevel) {
+	const labels = { qwen: "千问", yuanbao: "元宝", chatgpt: "ChatGPT" };
+	const preferredLevel = finalLevel === "A" ? "A" : "C";
+	let parts = Object.entries(items)
+		.filter(([, item]) => item.level === preferredLevel && item.summary)
+		.map(([model, item]) => `${labels[model]}: ${item.summary}`);
+	if (!parts.length && finalLevel !== "A") {
+		parts = Object.entries(items)
+			.filter(([, item]) => item.level && item.level !== "A" && item.summary)
+			.map(([model, item]) => `${labels[model]}: ${item.summary}`);
+	}
+	if (!parts.length) {
+		parts = Object.entries(items)
+			.filter(([, item]) => item.summary)
+			.map(([model, item]) => `${labels[model]}: ${item.summary}`);
+	}
+	return parts.join("；");
+}
+
 function renderAIMergeRows(rows) {
   const rank = { A: 0, B: 1, C: 2 };
-  const sorted = rows.slice().sort((a, b) => (rank[a.finalLevel] - rank[b.finalLevel]) || a.code.localeCompare(b.code));
+  const sorted = rows.slice().sort((a, b) => (rank[a.finalLevel] - rank[b.finalLevel]) || (b.aCount - a.aCount) || a.code.localeCompare(b.code));
   aiMergeRowsEl.innerHTML = sorted.map(row => `
-    <tr>
-      <td class="code-cell">${row.code}</td>
-      <td>${row.name || "-"}</td>
-      <td class="ai-level-${row.qwen || "empty"}">${row.qwen || "-"}</td>
-      <td class="ai-level-${row.yuanbao || "empty"}">${row.yuanbao || "-"}</td>
-      <td class="ai-level-${row.chatgpt || "empty"}">${row.chatgpt || "-"}</td>
-      <td class="ai-final ai-level-${row.finalLevel}">${row.finalLevel}</td>
-      <td class="muted">${row.reason}</td>
+    <tr data-code="${escapeHTML(row.code)}">
+      <td class="code-cell">${escapeHTML(row.code)}</td>
+      <td>${escapeHTML(row.name || "-")}</td>
+      <td class="ai-level-${row.qwen || "empty"}">${escapeHTML(row.qwen || "-")}</td>
+      <td class="ai-level-${row.yuanbao || "empty"}">${escapeHTML(row.yuanbao || "-")}</td>
+      <td class="ai-level-${row.chatgpt || "empty"}">${escapeHTML(row.chatgpt || "-")}</td>
+      <td>
+        <select class="ai-final-select ai-level-${row.finalLevel}" data-code="${escapeHTML(row.code)}">
+          ${["A", "B", "C"].map(level => `<option value="${level}" ${row.finalLevel === level ? "selected" : ""}>${level}</option>`).join("")}
+        </select>
+      </td>
+      <td>${row.aCount}</td>
+      <td class="muted">${escapeHTML(row.reason)}</td>
+      <td class="ai-summary">${escapeHTML(row.summary || "-")}</td>
     </tr>
   `).join("");
   const aCount = rows.filter(row => row.finalLevel === "A").length;
@@ -851,13 +1010,36 @@ function renderAIMergeRows(rows) {
   setAIMergeHint(`共 ${rows.length} 条，A类 ${aCount}，B类 ${bCount}，C类 ${cCount}`);
 }
 
+function updateAIMergeLevel(code, finalLevel) {
+	const row = aiMergeResult.find(item => item.code === code);
+	if (!row) return;
+	row.finalLevel = finalLevel;
+	row.reason = "人工调整";
+	row.summary = buildMergedAISummary(row.items || {}, finalLevel);
+	renderAIMergeRows(aiMergeResult);
+}
+
 function buildAIMergeMarkdown(rows) {
-  const sorted = rows.slice().sort((a, b) => a.finalLevel.localeCompare(b.finalLevel) || a.code.localeCompare(b.code));
-  const lines = ["| 代码 | 名称 | 千问 | 元宝 | ChatGPT | 最终分类 | 规则命中 |", "| --- | --- | --- | --- | --- | --- | --- |"];
+  const rank = { A: 0, B: 1, C: 2 };
+  const sorted = rows.slice().sort((a, b) => (rank[a.finalLevel] - rank[b.finalLevel]) || (b.aCount - a.aCount) || a.code.localeCompare(b.code));
+  const lines = ["| 代码 | 名称 | 千问 | 元宝 | ChatGPT | A命中数 | 最终分类 | 规则命中 | 合并总结 |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"];
   for (const row of sorted) {
-    lines.push(`| ${row.code} | ${row.name || "-"} | ${row.qwen || "-"} | ${row.yuanbao || "-"} | ${row.chatgpt || "-"} | ${row.finalLevel} | ${row.reason} |`);
+    lines.push(`| ${escapeMarkdownCell(row.code)} | ${escapeMarkdownCell(row.name || "-")} | ${escapeMarkdownCell(row.qwen || "-")} | ${escapeMarkdownCell(row.yuanbao || "-")} | ${escapeMarkdownCell(row.chatgpt || "-")} | ${row.aCount} | ${escapeMarkdownCell(row.finalLevel)} | ${escapeMarkdownCell(row.reason)} | ${escapeMarkdownCell(row.summary || "-")} |`);
   }
   return lines.join("\n");
+}
+
+function escapeHTML(value) {
+	return String(value || "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+function escapeMarkdownCell(value) {
+	return String(value || "").replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
 function setAIMergeHint(text) {
