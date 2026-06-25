@@ -242,6 +242,11 @@ button:disabled {
   display: none;
 }
 
+body.shadow-mode .shadow-action,
+body.watchlist-mode .watchlist-action {
+  display: inline-flex;
+}
+
 .danger-btn {
   min-width: 88px;
   background: #fff;
