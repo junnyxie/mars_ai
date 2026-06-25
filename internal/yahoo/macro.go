@@ -175,9 +175,13 @@ func buildMacroMarketItem(symbol macroMarketSymbol, quote dailyQuote, timestamps
 	if previousIndex < 0 {
 		return MacroMarketItem{}, fmt.Errorf("no previous quote found for %s", symbol.Symbol)
 	}
+	closeValue, ok := macroCloseValue(quote.Close, index)
+	if !ok {
+		return MacroMarketItem{}, fmt.Errorf("no close quote found for %s", symbol.Symbol)
+	}
 
 	scale := macroPriceScale(symbol)
-	closePrice := *quote.Close[index] * scale
+	closePrice := closeValue * scale
 	previousClose := *quote.Close[previousIndex] * scale
 	rise := 0.0
 	if previousClose != 0 {
@@ -460,7 +464,10 @@ func macroQuoteIndexes(symbol macroMarketSymbol, timestamps []int64, quote daily
 	indexes := make([]int, 0, limit)
 	maxLen := min(len(timestamps), len(quote.Close), len(quote.High), len(quote.Low))
 	for i := maxLen - 1; i >= 0 && len(indexes) < limit; i-- {
-		if quote.Close[i] == nil || quote.High[i] == nil || quote.Low[i] == nil {
+		if quote.High[i] == nil || quote.Low[i] == nil {
+			continue
+		}
+		if _, ok := macroCloseValue(quote.Close, i); !ok {
 			continue
 		}
 		if !macroTradeDate(symbol, timestamps[i]).After(targetDate) {
@@ -468,6 +475,21 @@ func macroQuoteIndexes(symbol macroMarketSymbol, timestamps []int64, quote daily
 		}
 	}
 	return indexes
+}
+
+func macroCloseValue(closeValues []*float64, index int) (float64, bool) {
+	if index < 0 || index >= len(closeValues) {
+		return 0, false
+	}
+	if closeValues[index] != nil {
+		return *closeValues[index], true
+	}
+	for i := index + 1; i < len(closeValues); i++ {
+		if closeValues[i] != nil {
+			return *closeValues[i], true
+		}
+	}
+	return 0, false
 }
 
 func previousCloseIndex(closeValues []*float64, todayIndex int) int {
