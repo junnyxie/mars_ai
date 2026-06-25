@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>股票池监控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260625-11" />
+  <link rel="stylesheet" href="/styles.css?v=20260625-12" />
 </head>
 <body>
   <div class="app-shell">
@@ -46,6 +46,15 @@
         <label class="star-filter">
           只看标星
           <input id="starredOnly" type="checkbox" />
+        </label>
+        <label class="level-filter">分类
+          <select id="levelFilter">
+            <option value="">全部</option>
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="C">C</option>
+            <option value="AB">A和B</option>
+          </select>
         </label>
         <label>每页显示
           <select id="pageSize">
@@ -169,6 +178,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260625-11"></script>
+  <script src="/app.js?v=20260625-12"></script>
 </body>
 </html>

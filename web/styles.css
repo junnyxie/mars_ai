@@ -160,6 +160,10 @@ label {
   min-width: 110px;
 }
 
+.level-filter {
+  min-width: 110px;
+}
+
 body.shadow-mode .cover-filter {
   display: grid;
 }
@@ -174,6 +178,10 @@ body.shadow-mode .cover-filter {
   width: 18px;
   height: 18px;
   padding: 0;
+}
+
+.level-filter select {
+  min-width: 78px;
 }
 
 input, select, button {

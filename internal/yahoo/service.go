@@ -2022,6 +2022,7 @@ func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (Wat
 	startDate := query.Get("start")
 	endDate := query.Get("end")
 	sourcePool := query.Get("source_pool")
+	levelFilter := query.Get("level")
 	sortField := allowedWatchlistSortField(query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -2060,6 +2061,12 @@ func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (Wat
 		where += " AND ws.source_pool = ?"
 		args = append(args, sourcePool)
 	}
+	levelWhere, levelArgs, err := buildLevelFilterSQL(levelFilter)
+	if err != nil {
+		return WatchlistStockPage{}, err
+	}
+	where += levelWhere
+	args = append(args, levelArgs...)
 
 	var total int
 	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM watchlist_stock ws LEFT JOIN stock s ON s.stock_code = ws.stock_code %s", where), args...).Scan(&total); err != nil {
@@ -2138,6 +2145,19 @@ func allowedWatchlistSortField(field string) string {
 	}
 }
 
+func buildLevelFilterSQL(level string) (string, []any, error) {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "":
+		return "", nil, nil
+	case "A", "B", "C":
+		return " AND s.level = ?", []any{strings.ToUpper(strings.TrimSpace(level))}, nil
+	case "AB":
+		return " AND s.level IN ('A', 'B')", nil, nil
+	default:
+		return "", nil, fmt.Errorf("invalid level")
+	}
+}
+
 func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, table string) (StockPoolPage, error) {
 	if !isStockPoolTable(table) {
 		return StockPoolPage{}, fmt.Errorf("invalid stock pool table")
@@ -2155,6 +2175,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	maxAmount := query.Get("max_amount")
 	coverBelow := query.Get("cover_below")
 	starred := query.Get("starred")
+	levelFilter := query.Get("level")
 	sortField := allowedSortField(table, query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -2212,6 +2233,12 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	if starred == "1" {
 		where += " AND COALESCE(p.`start`, 0) = 1"
 	}
+	levelWhere, levelArgs, err := buildLevelFilterSQL(levelFilter)
+	if err != nil {
+		return StockPoolPage{}, err
+	}
+	where += levelWhere
+	args = append(args, levelArgs...)
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s p LEFT JOIN stock s ON s.stock_code = p.stock_code %s", table, where)
 	countArgs := append([]any(nil), args...)
 	var total int

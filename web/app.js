@@ -10,6 +10,7 @@ const minAmountEl = document.querySelector("#minAmount");
 const maxAmountInputEl = document.querySelector("#maxAmountInput");
 const coverBelowEl = document.querySelector("#coverBelow");
 const starredOnlyEl = document.querySelector("#starredOnly");
+const levelFilterEl = document.querySelector("#levelFilter");
 const pageSizeEl = document.querySelector("#pageSize");
 const prevPageEl = document.querySelector("#prevPage");
 const nextPageEl = document.querySelector("#nextPage");
@@ -185,6 +186,7 @@ function buildQueryParams() {
   if (maxAmountInputEl.value !== "") params.set("max_amount", amountYiToRaw(maxAmountInputEl.value));
   if (currentPool === "shadow" && coverBelowEl.checked) params.set("cover_below", "1");
   if (starredOnlyEl.checked) params.set("starred", "1");
+  if (levelFilterEl.value !== "") params.set("level", levelFilterEl.value);
   return params;
 }
 
@@ -404,6 +406,11 @@ coverBelowEl.addEventListener("change", () => {
 });
 
 starredOnlyEl.addEventListener("change", () => {
+  currentPage = 1;
+  loadRows();
+});
+
+levelFilterEl.addEventListener("change", () => {
   currentPage = 1;
   loadRows();
 });
