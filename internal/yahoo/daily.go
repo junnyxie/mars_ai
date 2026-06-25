@@ -274,7 +274,8 @@ func buildShadowStocks(meta StockMeta, quote dailyQuote, timestamps []int64, day
 		}
 		highRise := (maxPrice - yesterdayClose) / yesterdayClose * 100
 		closeRise := (closePrice - yesterdayClose) / yesterdayClose * 100
-		if closeRise <= 0 || highRise <= 5 || maxPrice-closePrice <= closePrice-openPrice {
+		upperShadowRatio := (maxPrice - closePrice) / closePrice
+		if closeRise <= 0 || highRise <= 5 || upperShadowRatio <= 0.03 || maxPrice-closePrice <= closePrice-openPrice {
 			continue
 		}
 		amount := todayVolume * closePrice

@@ -33,6 +33,7 @@ type RunResult struct {
 type CoverRunResult struct {
 	TotalRows int `json:"total_rows"`
 	Updated   int `json:"updated"`
+	Deleted   int `json:"deleted"`
 	Skipped   int `json:"skipped"`
 	Failed    int `json:"failed"`
 }
@@ -589,9 +590,24 @@ func (r *VolumeRunner) RunShadowCoverIDs(ctx context.Context, ids []int64) (Cove
 		}
 
 		if !row.FirstCoverPrice.Valid {
-			price, coverTime, ok := findFirstCoverClose(cached.quote, cached.timestamps, row.GmtCreate, row.MaxPrice)
+			price, coverTime, ok := findFirstCoverCloseWithinDays(cached.quote, cached.timestamps, row.GmtCreate, row.MaxPrice, 5)
 			if !ok {
-				result.Skipped++
+				if shadowCoverWindowExpired(cached.quote, cached.timestamps, row.GmtCreate, 5) {
+					if err := MarkShadowDeleted(ctx, r.db, row.ID); err != nil {
+						result.Failed++
+						log.Printf("[shadow-cover] mark deleted failed id=%d stock_code=%s err=%v", row.ID, row.StockCode, err)
+						continue
+					}
+					if err := deleteWatchlistBySource(ctx, r.db, "shadow", row.ID); err != nil {
+						result.Failed++
+						log.Printf("[shadow-cover] delete watchlist after shadow deleted failed id=%d stock_code=%s err=%v", row.ID, row.StockCode, err)
+						continue
+					}
+					result.Deleted++
+					log.Printf("[shadow-cover] mark deleted id=%d stock_code=%s reason=no first cover within 5 days", row.ID, row.StockCode)
+				} else {
+					result.Skipped++
+				}
 				continue
 			}
 			nowPrice, nowTime, ok := latestClose(cached.quote, cached.timestamps)
@@ -1885,7 +1901,7 @@ func watchlistSourcePool(table string) (string, error) {
 
 func LoadShadowCoverRows(ctx context.Context, db *sql.DB, ids []int64) ([]ShadowCoverRow, error) {
 	args := []any{}
-	where := "WHERE s.region IN ('SH', 'SZ')"
+	where := "WHERE s.region IN ('SH', 'SZ') AND COALESCE(ss.`delete`, 0) = 0"
 	if len(ids) > 0 {
 		normalized, err := normalizeIDs(ids)
 		if err != nil {
@@ -1996,6 +2012,14 @@ WHERE id = ?
 `, price, coverTime, id)
 	if err != nil {
 		return fmt.Errorf("update shadow now cover id=%d failed: %w", id, err)
+	}
+	return nil
+}
+
+func MarkShadowDeleted(ctx context.Context, db *sql.DB, id int64) error {
+	_, err := db.ExecContext(ctx, "UPDATE shadow_stock SET `delete` = 1 WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("mark shadow deleted id=%d failed: %w", id, err)
 	}
 	return nil
 }
@@ -2229,6 +2253,9 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 			return StockPoolPage{}, fmt.Errorf("cover_below only supports shadow_stock")
 		}
 		where += " AND p.first_cover_price IS NOT NULL AND p.now_cover_price IS NOT NULL AND p.now_cover_price >= p.first_cover_price"
+	}
+	if table == "shadow_stock" {
+		where += " AND COALESCE(p.`delete`, 0) = 0"
 	}
 	if starred == "1" {
 		where += " AND COALESCE(p.`start`, 0) = 1"
@@ -2493,6 +2520,36 @@ func shadowCoverPeriods(now time.Time) (int64, int64) {
 	return period1, period2
 }
 
+func findFirstCoverCloseWithinDays(quote dailyQuote, timestamps []int64, start time.Time, maxPrice float64, days int) (float64, time.Time, bool) {
+	startDate := dateOnly(start)
+	deadline := startDate.AddDate(0, 0, days)
+	maxLen := min(len(quote.Close), len(timestamps))
+	for i := 0; i < maxLen; i++ {
+		if quote.Close[i] == nil {
+			continue
+		}
+		tradeTime := quoteTime(timestamps, i)
+		tradeDate := dateOnly(tradeTime)
+		if tradeDate.Before(startDate) || tradeDate.After(deadline) {
+			continue
+		}
+		closePrice := *quote.Close[i]
+		if closePrice > maxPrice {
+			return round(closePrice, 2), tradeTime, true
+		}
+	}
+	return 0, time.Time{}, false
+}
+
+func shadowCoverWindowExpired(quote dailyQuote, timestamps []int64, start time.Time, days int) bool {
+	_, latestTime, ok := latestClose(quote, timestamps)
+	if !ok {
+		return false
+	}
+	deadline := dateOnly(start).AddDate(0, 0, days)
+	return dateOnly(latestTime).After(deadline)
+}
+
 func ensureWatchlistStockTable(ctx context.Context, db *sql.DB) error {
 	ddl := `
 CREATE TABLE IF NOT EXISTS watchlist_stock (
@@ -2575,6 +2632,7 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
   high_rate DECIMAL(10,4) DEFAULT NULL COMMENT '最高价涨幅',
   ` + "`start`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标星',
   gpt_star INT NOT NULL DEFAULT 0 COMMENT 'GPT分析标星',
+  ` + "`delete`" + ` INT NOT NULL DEFAULT 0 COMMENT '是否标记删除',
   gmt_create TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   gmt_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (id),
@@ -2598,6 +2656,9 @@ CREATE TABLE IF NOT EXISTS shadow_stock (
 
 func ensureShadowStockExtraColumns(ctx context.Context, db *sql.DB) error {
 	if err := ensureTableColumn(ctx, db, "shadow_stock", "high_rate", "ALTER TABLE shadow_stock ADD COLUMN high_rate DECIMAL(10,4) DEFAULT NULL COMMENT '最高价涨幅'"); err != nil {
+		return err
+	}
+	if err := ensureTableColumn(ctx, db, "shadow_stock", "delete", "ALTER TABLE shadow_stock ADD COLUMN `delete` INT NOT NULL DEFAULT 0 COMMENT '是否标记删除'"); err != nil {
 		return err
 	}
 	hasShadowRate, err := tableColumnExists(ctx, db, "shadow_stock", "shadow_rate")
