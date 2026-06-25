@@ -1964,9 +1964,11 @@ func LoadWatchlistUpdateRows(ctx context.Context, db *sql.DB, ids []int64) ([]wa
 	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 SELECT ws.id, ws.stock_code, ws.stock_name, COALESCE(s.region, ''),
-       ws.sector_id, ws.sector_name, COALESCE(ws.join_price, 0)
+       ws.sector_id, ws.sector_name,
+       COALESCE(CASE WHEN ws.source_pool = 'shadow' THEN ss.first_cover_price ELSE ws.join_price END, 0)
 FROM watchlist_stock ws
 JOIN stock s ON s.stock_code = ws.stock_code
+LEFT JOIN shadow_stock ss ON ws.source_pool = 'shadow' AND ss.id = ws.source_id
 %s
 ORDER BY ws.id`, where), args...)
 	if err != nil {
@@ -2070,12 +2072,14 @@ func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (Wat
 	}
 	args := []any{}
 	where := "WHERE 1=1"
+	joinTimeField := watchlistJoinTimeField()
+	joinPriceField := watchlistJoinPriceField()
 	if startDate != "" {
-		where += " AND ws.join_time >= ?"
+		where += " AND " + joinTimeField + " >= ?"
 		args = append(args, startDate+" 00:00:00")
 	}
 	if endDate != "" {
-		where += " AND ws.join_time <= ?"
+		where += " AND " + joinTimeField + " <= ?"
 		args = append(args, endDate+" 23:59:59")
 	}
 	if sourcePool != "" {
@@ -2093,21 +2097,27 @@ func queryWatchlistRows(ctx context.Context, db *sql.DB, req *http.Request) (Wat
 	args = append(args, levelArgs...)
 
 	var total int
-	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM watchlist_stock ws LEFT JOIN stock s ON s.stock_code = ws.stock_code %s", where), args...).Scan(&total); err != nil {
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(`
+SELECT COUNT(*)
+FROM watchlist_stock ws
+LEFT JOIN stock s ON s.stock_code = ws.stock_code
+LEFT JOIN shadow_stock ss ON ws.source_pool = 'shadow' AND ss.id = ws.source_id
+%s`, where), args...).Scan(&total); err != nil {
 		return WatchlistStockPage{}, fmt.Errorf("count watchlist_stock failed: %w", err)
 	}
 	offset := (page - 1) * pageSize
 	args = append(args, pageSize, offset)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 SELECT ws.id, ws.source_pool, ws.source_id, ws.stock_code, ws.stock_name, COALESCE(s.level, ''), ws.sector_id, COALESCE(ws.sector_name, ''),
-       DATE_FORMAT(ws.join_time, '%%Y-%%m-%%d %%H:%%i:%%s'), COALESCE(ws.join_price, 0),
+       DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i:%%s'), COALESCE(%s, 0),
        COALESCE(ws.current_price, 0), COALESCE(DATE_FORMAT(ws.`+"`current_time`"+`, '%%Y-%%m-%%d %%H:%%i:%%s'), ''),
        COALESCE(ws.rise, 0), DATE_FORMAT(ws.gmt_create, '%%Y-%%m-%%d %%H:%%i:%%s')
 FROM watchlist_stock ws
 LEFT JOIN stock s ON s.stock_code = ws.stock_code
+LEFT JOIN shadow_stock ss ON ws.source_pool = 'shadow' AND ss.id = ws.source_id
 %s
 ORDER BY %s %s
-LIMIT ? OFFSET ?`, where, sortField, sortDir), args...)
+LIMIT ? OFFSET ?`, joinTimeField, joinPriceField, where, sortField, sortDir), args...)
 	if err != nil {
 		return WatchlistStockPage{}, fmt.Errorf("query watchlist_stock failed: %w", err)
 	}
@@ -2155,9 +2165,9 @@ func allowedWatchlistSortField(field string) string {
 	case "sector_name":
 		return "ws.sector_name"
 	case "join_time":
-		return "ws.join_time"
+		return watchlistJoinTimeField()
 	case "join_price":
-		return "ws.join_price"
+		return watchlistJoinPriceField()
 	case "current_price":
 		return "ws.current_price"
 	case "current_time":
@@ -2165,8 +2175,16 @@ func allowedWatchlistSortField(field string) string {
 	case "rise":
 		return "ws.rise"
 	default:
-		return "ws.join_time"
+		return watchlistJoinTimeField()
 	}
+}
+
+func watchlistJoinTimeField() string {
+	return "CASE WHEN ws.source_pool = 'shadow' THEN COALESCE(ss.first_cover_time, ws.join_time) ELSE ws.join_time END"
+}
+
+func watchlistJoinPriceField() string {
+	return "CASE WHEN ws.source_pool = 'shadow' THEN COALESCE(ss.first_cover_price, ws.join_price) ELSE ws.join_price END"
 }
 
 func buildLevelFilterSQL(level string) (string, []any, error) {
