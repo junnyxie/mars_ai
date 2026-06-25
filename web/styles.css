@@ -419,6 +419,97 @@ button:disabled {
   line-height: 1.7;
 }
 
+.ai-merge-panel {
+  display: none;
+  margin-top: 14px;
+}
+
+.ai-input-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.ai-input-grid label {
+  min-width: 0;
+  color: #344054;
+  font-weight: 800;
+}
+
+.ai-input-grid textarea {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--text);
+  font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+#mergeAIButton {
+  min-width: 96px;
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+#copyAIResultButton {
+  min-width: 96px;
+  background: #eef8f6;
+  color: #0f766e;
+  border-color: #9fd8cf;
+}
+
+#aiMergeHint {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.ai-result-wrap {
+  margin-top: 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.ai-result-table {
+  min-width: 900px;
+}
+
+.ai-final {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.ai-level-A {
+  color: #0f766e;
+  font-weight: 900;
+}
+
+.ai-level-B {
+  color: #d97706;
+  font-weight: 900;
+}
+
+.ai-level-C {
+  color: #b42318;
+  font-weight: 900;
+}
+
+.ai-level-empty {
+  color: var(--muted);
+}
+
 .summary div {
   padding: 16px;
   background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
@@ -649,6 +740,10 @@ tbody tr:hover {
 
   .market-visual {
     width: 100%;
+  }
+
+  .ai-input-grid {
+    grid-template-columns: 1fr;
   }
 
   .summary {

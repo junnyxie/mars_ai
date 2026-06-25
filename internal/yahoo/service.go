@@ -1262,8 +1262,10 @@ func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeS
 	query := req.URL.Query()
 	fmt.Fprintf(&builder, "# %s基本面初筛\n\n", title)
 	builder.WriteString("下面是我的 A 股技术形态股票池，请你只做基本面和事件风险初筛，不要给买卖建议。\n\n")
-	builder.WriteString("请从主营业务、业绩稳定性、估值水平、行业景气度、公告风险、解禁减持风险、财务质量、技术形态与基本面匹配度几个角度分析。\n")
-	builder.WriteString("最后请给出三个等级之一：优先研究、谨慎观察、直接排除，并列出需要人工确认的问题。\n\n")
+	builder.WriteString("1、帮我把这些标的物做筛选，唯一判断是优质资产、基本面良好的划分为A类\n")
+	builder.WriteString("2、A类里面，估值严重超标，透支未来2-3年溢价的，从A类里面拿出来，分到B类\n")
+	builder.WriteString("3、基本面明显不行的，分到C类\n")
+	builder.WriteString("每个标的物都需要一个简单总结，这次不用分类分段，全部标的作为一个 list 一起给我，分类列放在第一列。\n\n")
 	builder.WriteString("## 筛选条件\n\n")
 	fmt.Fprintf(&builder, "- 股票池：%s\n", title)
 	fmt.Fprintf(&builder, "- 开始日期：%s\n", valueOrDash(query.Get("start")))
@@ -1274,40 +1276,94 @@ func buildStockPoolExportMarkdown(pool string, req *http.Request, rows []VolumeS
 	fmt.Fprintf(&builder, "- 只看GPT星：%s\n", yesNo(query.Get("gpt_starred") == "1"))
 	fmt.Fprintf(&builder, "- 当前导出数量：%d\n\n", len(rows))
 	builder.WriteString("## 输出格式要求\n\n")
-	builder.WriteString("请用表格输出：股票代码、名称、行业、入池原因、基本面摘要、主要风险、评级、是否建议GPT星标、需要人工确认的问题。\n")
-	builder.WriteString("如果评级为优先研究，请在“是否建议GPT星标”列填“是”，否则填“否”。\n\n")
+	builder.WriteString("请用表格输出：评级、股票代码、名称、行业、基本面摘要。\n\n")
 	builder.WriteString("## 股票列表\n\n")
 	if len(rows) == 0 {
 		builder.WriteString("当前筛选条件下没有股票。\n")
 		return builder.String()
 	}
+	writeStockPoolExportTable(&builder, pool, title, rows)
+	return builder.String()
+}
+
+func writeStockPoolExportTable(builder *strings.Builder, pool string, title string, rows []VolumeStockRow) {
+	headers := []string{
+		"序号", "股票代码", "名称", "行业", "股票池", "入池时间", "当前GPT星", "雪球链接",
+		"收盘价", "最高价", "最低价", riseLabel(pool), "成交额(亿)", metricLabel(pool),
+	}
+	if pool == "breakout" {
+		headers = append(headers, "前高价", "前高日成交量", "前高日期")
+	}
+	if pool == "shadow" {
+		headers = append(headers, "首次覆盖价", "首次覆盖时间", "最新覆盖价", "最新覆盖时间")
+	}
+	headers = append(headers, "入池原因")
+
+	writeMarkdownRow(builder, headers)
+	writeMarkdownSeparator(builder, len(headers))
 	for index, row := range rows {
-		fmt.Fprintf(&builder, "### %d. %s %s\n\n", index+1, row.StockCode, row.StockName)
-		fmt.Fprintf(&builder, "- 股票池：%s\n", title)
-		fmt.Fprintf(&builder, "- 行业：%s\n", valueOrDash(row.SectorName))
-		fmt.Fprintf(&builder, "- 入池时间：%s\n", valueOrDash(row.GmtCreate))
-		fmt.Fprintf(&builder, "- 当前GPT星：%s\n", yesNo(row.GPTStar == 1))
-		fmt.Fprintf(&builder, "- 雪球链接：%s\n", xueqiuURL(row.StockCode))
-		fmt.Fprintf(&builder, "- 收盘价：%.2f\n", row.ClosePrice)
-		fmt.Fprintf(&builder, "- 最高价：%.2f\n", row.MaxPrice)
-		fmt.Fprintf(&builder, "- 最低价：%.2f\n", row.MinPrice)
-		fmt.Fprintf(&builder, "- %s：%.2f%%\n", riseLabel(pool), row.Rise)
-		fmt.Fprintf(&builder, "- 成交额：%.2f 亿\n", row.Amount/100000000)
-		fmt.Fprintf(&builder, "- %s：%.2f%s\n", metricLabel(pool), row.Vol, metricSuffix(pool))
+		values := []string{
+			strconv.Itoa(index + 1),
+			row.StockCode,
+			row.StockName,
+			valueOrDash(row.SectorName),
+			title,
+			valueOrDash(row.GmtCreate),
+			yesNo(row.GPTStar == 1),
+			xueqiuURL(row.StockCode),
+			fmt.Sprintf("%.2f", row.ClosePrice),
+			fmt.Sprintf("%.2f", row.MaxPrice),
+			fmt.Sprintf("%.2f", row.MinPrice),
+			fmt.Sprintf("%.2f%%", row.Rise),
+			fmt.Sprintf("%.2f", row.Amount/100000000),
+			fmt.Sprintf("%.2f%s", row.Vol, metricSuffix(pool)),
+		}
 		if pool == "breakout" {
-			fmt.Fprintf(&builder, "- 前高价：%.2f\n", row.BeforeMaxPrice)
-			fmt.Fprintf(&builder, "- 前高日成交量：%.0f\n", row.BeforeMaxVol)
-			fmt.Fprintf(&builder, "- 前高日期：%s\n", dateOnlyString(row.BeforeMaxTime))
+			values = append(values,
+				fmt.Sprintf("%.2f", row.BeforeMaxPrice),
+				fmt.Sprintf("%.0f", row.BeforeMaxVol),
+				dateOnlyString(row.BeforeMaxTime),
+			)
 		}
 		if pool == "shadow" {
-			fmt.Fprintf(&builder, "- 首次覆盖价：%s\n", priceOrDash(row.FirstCoverPrice))
-			fmt.Fprintf(&builder, "- 首次覆盖时间：%s\n", dateOnlyString(row.FirstCoverTime))
-			fmt.Fprintf(&builder, "- 最新覆盖价：%s\n", priceOrDash(row.NowCoverPrice))
-			fmt.Fprintf(&builder, "- 最新覆盖时间：%s\n", dateOnlyString(row.NowCoverTime))
+			values = append(values,
+				priceOrDash(row.FirstCoverPrice),
+				dateOnlyString(row.FirstCoverTime),
+				priceOrDash(row.NowCoverPrice),
+				dateOnlyString(row.NowCoverTime),
+			)
 		}
-		fmt.Fprintf(&builder, "- 入池原因：%s\n\n", stockPoolReason(pool))
+		values = append(values, stockPoolReason(pool))
+		writeMarkdownRow(builder, values)
 	}
-	return builder.String()
+	builder.WriteString("\n")
+}
+
+func writeMarkdownSeparator(builder *strings.Builder, count int) {
+	values := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		values = append(values, "---")
+	}
+	writeMarkdownRow(builder, values)
+}
+
+func writeMarkdownRow(builder *strings.Builder, values []string) {
+	builder.WriteString("|")
+	for _, value := range values {
+		fmt.Fprintf(builder, " %s |", escapeMarkdownTableCell(value))
+	}
+	builder.WriteString("\n")
+}
+
+func escapeMarkdownTableCell(value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "|", "\\|")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func stockPoolTitle(pool string) string {

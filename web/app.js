@@ -36,6 +36,14 @@ const macroChartEl = document.querySelector("#macroChart");
 const macroSelectedHintEl = document.querySelector("#macroSelectedHint");
 const macroRowsEl = document.querySelector("#macroRows");
 const macroSummaryEl = document.querySelector("#macroSummary");
+const aiMergePanelEl = document.querySelector("#aiMergePanel");
+const qwenTextEl = document.querySelector("#qwenText");
+const yuanbaoTextEl = document.querySelector("#yuanbaoText");
+const chatgptTextEl = document.querySelector("#chatgptText");
+const mergeAIButton = document.querySelector("#mergeAIButton");
+const copyAIResultButton = document.querySelector("#copyAIResultButton");
+const aiMergeHintEl = document.querySelector("#aiMergeHint");
+const aiMergeRowsEl = document.querySelector("#aiMergeRows");
 
 const pools = {
   volume: {
@@ -95,6 +103,15 @@ const pools = {
     metricLabel: "宏观评分",
     maxMetricLabel: "总评分",
     metricSuffix: ""
+  },
+  aiMerge: {
+    title: "AI评级汇总",
+    desc: "粘贴千问、元宝、ChatGPT 的 A/B/C 分类结果，按统一规则合并",
+    api: "",
+    riseLabel: "最终分类",
+    metricLabel: "A类数量",
+    maxMetricLabel: "A类数量",
+    metricSuffix: ""
   }
 };
 
@@ -106,6 +123,7 @@ let sortDir = defaultSortDir;
 let requestSeq = 0;
 let currentPage = 1;
 let totalRows = 0;
+let aiMergeResult = [];
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -192,6 +210,10 @@ async function loadRows() {
   const pool = pools[poolName];
   if (poolName === "macro") {
     await loadMacroMarket();
+    return;
+  }
+  if (poolName === "aiMerge") {
+    renderAIMerge();
     return;
   }
   const seq = ++requestSeq;
@@ -348,12 +370,15 @@ function applyPool(poolName) {
 	document.body.classList.toggle("breakout-mode", poolName === "breakout");
 	document.body.classList.toggle("watchlist-mode", poolName === "watchlist");
 	document.body.classList.toggle("macro-mode", poolName === "macro");
+	document.body.classList.toggle("ai-merge-mode", poolName === "aiMerge");
   const isMacro = poolName === "macro";
+  const isAIMerge = poolName === "aiMerge";
   const isWatchlist = poolName === "watchlist";
-  document.querySelector(".toolbar").style.display = isMacro ? "none" : "";
-  document.querySelector(".summary").style.display = isMacro ? "none" : "";
-  document.querySelector(".table-wrap").style.display = isMacro ? "none" : "";
-  document.querySelector(".pager").style.display = isMacro ? "none" : "";
+  const isStandalone = isMacro || isAIMerge;
+  document.querySelector(".toolbar").style.display = isStandalone ? "none" : "";
+  document.querySelector(".summary").style.display = isStandalone ? "none" : "";
+  document.querySelector(".table-wrap").style.display = isStandalone ? "none" : "";
+  document.querySelector(".pager").style.display = isStandalone ? "none" : "";
   document.querySelectorAll(".star-filter").forEach(el => {
     el.style.display = isWatchlist ? "none" : "";
   });
@@ -362,6 +387,7 @@ function applyPool(poolName) {
   refreshSelectedBtn.style.display = isWatchlist ? "" : "none";
   maxAmountEl.nextElementSibling.textContent = isWatchlist ? "最高实时价" : "最高成交额(亿)";
   macroPanelEl.style.display = isMacro ? "grid" : "none";
+  aiMergePanelEl.style.display = isAIMerge ? "block" : "none";
 	resetSummary();
   updateSortArrows();
   loadRows();
@@ -451,6 +477,24 @@ coverSelectedBtn.addEventListener("click", () => {
 
 refreshSelectedBtn.addEventListener("click", () => {
   runSelectedAction("refresh");
+});
+
+mergeAIButton.addEventListener("click", () => {
+  renderAIMerge();
+});
+
+copyAIResultButton.addEventListener("click", async () => {
+  if (!aiMergeResult.length) {
+    setAIMergeHint("没有可复制的结果");
+    return;
+  }
+  const text = buildAIMergeMarkdown(aiMergeResult);
+  try {
+    await copyText(text);
+    setAIMergeHint(`已复制 ${aiMergeResult.length} 条结果`);
+  } catch (err) {
+    setAIMergeHint(err.message);
+  }
 });
 
 rowsEl.addEventListener("change", event => {
@@ -650,6 +694,175 @@ async function copyText(text) {
   textarea.select();
   document.execCommand("copy");
   textarea.remove();
+}
+
+function renderAIMerge() {
+  const qwen = parseAIRatingText(qwenTextEl.value, "qwen");
+  const yuanbao = parseAIRatingText(yuanbaoTextEl.value, "yuanbao");
+  const chatgpt = parseAIRatingText(chatgptTextEl.value, "chatgpt");
+  const codes = Array.from(new Set([...qwen.keys(), ...yuanbao.keys(), ...chatgpt.keys()])).sort();
+  aiMergeResult = codes.map(code => {
+    const qwenItem = qwen.get(code) || {};
+    const yuanbaoItem = yuanbao.get(code) || {};
+    const chatgptItem = chatgpt.get(code) || {};
+    const levels = {
+      qwen: qwenItem.level || "",
+      yuanbao: yuanbaoItem.level || "",
+      chatgpt: chatgptItem.level || ""
+    };
+    const merged = mergeAILevels(levels);
+    return {
+      code,
+      name: qwenItem.name || yuanbaoItem.name || chatgptItem.name || "",
+      qwen: levels.qwen,
+      yuanbao: levels.yuanbao,
+      chatgpt: levels.chatgpt,
+      finalLevel: merged.level,
+      reason: merged.reason
+    };
+  });
+  renderAIMergeRows(aiMergeResult);
+}
+
+function parseAIRatingText(text) {
+	const result = new Map();
+	let currentLevel = "";
+	const lines = String(text || "")
+		.replace(/\r/g, "")
+		.split("\n")
+		.map(line => line.trim())
+		.filter(Boolean);
+	for (const line of lines) {
+		const headingLevel = extractAIHeadingLevel(line);
+		if (headingLevel) {
+			currentLevel = headingLevel;
+			continue;
+		}
+		const codes = Array.from(line.matchAll(/\b(\d{6})\b/g)).map(match => match[1]);
+		if (!codes.length) continue;
+		const level = extractAILevel(line) || currentLevel;
+		if (!level) continue;
+		for (const code of codes) {
+			const next = {
+				code,
+				name: extractStockName(line, code),
+				level
+			};
+			const previous = result.get(code);
+			result.set(code, mergeSameModelRating(previous, next));
+		}
+	}
+	return result;
+}
+
+function extractAIHeadingLevel(text) {
+	const value = String(text || "")
+		.replace(/[ＡＢＣ]/g, char => String.fromCharCode(char.charCodeAt(0) - 65248))
+		.replace(/^[^ABCabc]*/g, "")
+		.trim();
+	const match = value.match(/^(?:#+\s*)?([ABC])\s*类(?:[（(：:\s]|$)/i);
+	if (match) return match[1].toUpperCase();
+	return "";
+}
+
+function extractAILevel(text) {
+	const value = String(text || "").replace(/[ＡＢＣ]/g, char => String.fromCharCode(char.charCodeAt(0) - 65248));
+	const tableCells = value.split("|").map(cell => cell.trim().toUpperCase());
+	const tableLevel = tableCells.find(cell => /^[ABC](类|级|档)?$/.test(cell));
+	if (tableLevel) return tableLevel[0];
+
+  const patterns = [
+    /(?:评级|分类|等级|结论|类别|综合|最终|模型评级|AI评级)\s*[:：为是-]?\s*([ABC])\s*(?:类|级|档)?/i,
+    /(?:归为|输出为|判定为|定为)\s*([ABC])\s*(?:类|级|档)/i,
+    /([ABC])\s*(?:类|级|档)/i
+	];
+	for (const pattern of patterns) {
+		const match = value.match(pattern);
+		if (match) return match[1].toUpperCase();
+	}
+	const tokens = value.trim().split(/\s+/).map(token => token.toUpperCase());
+	const tokenLevel = tokens.find(token => /^[ABC](?:类|级|档|边缘)?$/.test(token));
+	if (tokenLevel) return tokenLevel[0];
+	return "";
+}
+
+function mergeSameModelRating(previous, next) {
+	if (!previous) return next;
+	const rank = { A: 1, B: 2, C: 3 };
+	const previousRank = rank[previous.level] || 0;
+	const nextRank = rank[next.level] || 0;
+	if (nextRank > previousRank) {
+		return {
+			...next,
+			name: previous.name || next.name
+		};
+	}
+	return {
+		...previous,
+		name: previous.name || next.name
+	};
+}
+
+function extractStockName(text, code) {
+  const clean = String(text || "")
+    .replace(/\|/g, " ")
+    .replace(/[*#`：:，,。；;]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const beforePattern = new RegExp(`([\\u4e00-\\u9fa5A-Za-z*ST]{2,16})\\s+${code}`);
+  const beforeMatch = clean.match(beforePattern);
+  if (beforeMatch) return beforeMatch[1];
+  const afterPattern = new RegExp(`${code}\\s+([\\u4e00-\\u9fa5A-Za-z*ST]{2,16})`);
+  const afterMatch = clean.match(afterPattern);
+  if (afterMatch) return afterMatch[1];
+  return "";
+}
+
+function mergeAILevels(levels) {
+  const values = [levels.qwen, levels.yuanbao, levels.chatgpt].filter(Boolean);
+  const hasA = values.includes("A");
+  const hasC = values.includes("C");
+  if (!hasA) {
+    return { level: "C", reason: "没有任何模型给A" };
+  }
+  if (hasC) {
+    return { level: "B", reason: "A与C同时出现，降为B" };
+  }
+  return { level: "A", reason: "至少一个A，且没有C" };
+}
+
+function renderAIMergeRows(rows) {
+  const rank = { A: 0, B: 1, C: 2 };
+  const sorted = rows.slice().sort((a, b) => (rank[a.finalLevel] - rank[b.finalLevel]) || a.code.localeCompare(b.code));
+  aiMergeRowsEl.innerHTML = sorted.map(row => `
+    <tr>
+      <td class="code-cell">${row.code}</td>
+      <td>${row.name || "-"}</td>
+      <td class="ai-level-${row.qwen || "empty"}">${row.qwen || "-"}</td>
+      <td class="ai-level-${row.yuanbao || "empty"}">${row.yuanbao || "-"}</td>
+      <td class="ai-level-${row.chatgpt || "empty"}">${row.chatgpt || "-"}</td>
+      <td class="ai-final ai-level-${row.finalLevel}">${row.finalLevel}</td>
+      <td class="muted">${row.reason}</td>
+    </tr>
+  `).join("");
+  const aCount = rows.filter(row => row.finalLevel === "A").length;
+  const bCount = rows.filter(row => row.finalLevel === "B").length;
+  const cCount = rows.filter(row => row.finalLevel === "C").length;
+  setAIMergeHint(`共 ${rows.length} 条，A类 ${aCount}，B类 ${bCount}，C类 ${cCount}`);
+}
+
+function buildAIMergeMarkdown(rows) {
+  const sorted = rows.slice().sort((a, b) => a.finalLevel.localeCompare(b.finalLevel) || a.code.localeCompare(b.code));
+  const lines = ["| 代码 | 名称 | 千问 | 元宝 | ChatGPT | 最终分类 | 规则命中 |", "| --- | --- | --- | --- | --- | --- | --- |"];
+  for (const row of sorted) {
+    lines.push(`| ${row.code} | ${row.name || "-"} | ${row.qwen || "-"} | ${row.yuanbao || "-"} | ${row.chatgpt || "-"} | ${row.finalLevel} | ${row.reason} |`);
+  }
+  return lines.join("\n");
+}
+
+function setAIMergeHint(text) {
+  aiMergeHintEl.textContent = text;
+  setStatus(text);
 }
 
 async function loadMacroMarket() {
