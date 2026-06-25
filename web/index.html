@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>股票池监控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260625-2" />
+  <link rel="stylesheet" href="/styles.css?v=20260625-3" />
 </head>
 <body>
   <div class="app-shell">
@@ -58,6 +58,8 @@
           </select>
         </label>
         <button id="searchBtn" type="button">查询</button>
+        <button id="coverSelectedBtn" class="action-btn shadow-action" type="button" disabled>批量Cover</button>
+        <button id="refreshSelectedBtn" class="action-btn watchlist-action" type="button" disabled>刷新最新价</button>
         <button id="exportBtn" type="button">导出给 ChatGPT</button>
         <button id="deleteSelectedBtn" class="danger-btn" type="button" disabled>批量删除</button>
       </section>
@@ -132,6 +134,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js?v=20260625-2"></script>
+  <script src="/app.js?v=20260625-3"></script>
 </body>
 </html>

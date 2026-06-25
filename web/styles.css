@@ -218,6 +218,22 @@ button:disabled {
   background: #ddf1ed;
 }
 
+.action-btn {
+  min-width: 106px;
+  background: #eef8f6;
+  color: #0f766e;
+  border-color: #9fd8cf;
+}
+
+.action-btn:hover:not(:disabled) {
+  background: #ddf1ed;
+}
+
+.shadow-action,
+.watchlist-action {
+  display: none;
+}
+
 .danger-btn {
   min-width: 88px;
   background: #fff;

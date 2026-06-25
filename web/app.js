@@ -23,6 +23,8 @@ const menuEl = document.querySelector(".menu");
 const selectAllRowsEl = document.querySelector("#selectAllRows");
 const deleteSelectedBtn = document.querySelector("#deleteSelectedBtn");
 const exportBtn = document.querySelector("#exportBtn");
+const coverSelectedBtn = document.querySelector("#coverSelectedBtn");
+const refreshSelectedBtn = document.querySelector("#refreshSelectedBtn");
 const macroPanelEl = document.querySelector("#macroPanel");
 const macroDateEl = document.querySelector("#macroDate");
 const macroScoreEl = document.querySelector("#macroScore");
@@ -53,6 +55,7 @@ const pools = {
     desc: "最高价涨幅来自 shadow_stock.high_rate，收盘涨幅来自 shadow_stock.raise_rate",
     api: "/api/shadow-stocks",
     deleteApi: "/api/shadow-stocks/delete",
+    coverApi: "/api/shadow-stocks/cover",
     startApi: "/api/shadow-stocks/start",
     gptStarApi: "/api/shadow-stocks/gpt-star",
     riseLabel: "收盘涨幅",
@@ -77,6 +80,7 @@ const pools = {
     desc: "手动标星和GPT标星同时满足后加入，跟踪加入后的实时价格表现",
     api: "/api/watchlist-stocks",
     deleteApi: "/api/watchlist-stocks/delete",
+    refreshApi: "/api/watchlist-stocks/refresh",
     riseLabel: "监控涨跌幅",
     metricLabel: "涨跌幅",
     maxMetricLabel: "最高涨幅",
@@ -354,6 +358,8 @@ function applyPool(poolName) {
     el.style.display = isWatchlist ? "none" : "";
   });
   exportBtn.style.display = isWatchlist ? "none" : "";
+  coverSelectedBtn.style.display = poolName === "shadow" ? "" : "none";
+  refreshSelectedBtn.style.display = isWatchlist ? "" : "none";
   maxAmountEl.nextElementSibling.textContent = isWatchlist ? "最高实时价" : "最高成交额(亿)";
   macroPanelEl.style.display = isMacro ? "grid" : "none";
 	resetSummary();
@@ -439,6 +445,14 @@ deleteSelectedBtn.addEventListener("click", () => {
   deleteRows(getSelectedRowIDs());
 });
 
+coverSelectedBtn.addEventListener("click", () => {
+  runSelectedAction("cover");
+});
+
+refreshSelectedBtn.addEventListener("click", () => {
+  runSelectedAction("refresh");
+});
+
 rowsEl.addEventListener("change", event => {
   if (event.target.classList.contains("row-check")) {
     updateSelectionState();
@@ -492,6 +506,35 @@ function updateSelectionState() {
   selectAllRowsEl.checked = checks.length > 0 && checkedCount === checks.length;
   selectAllRowsEl.indeterminate = checkedCount > 0 && checkedCount < checks.length;
   deleteSelectedBtn.disabled = checkedCount === 0;
+  coverSelectedBtn.disabled = currentPool !== "shadow" || checkedCount === 0;
+  refreshSelectedBtn.disabled = currentPool !== "watchlist" || checkedCount === 0;
+}
+
+async function runSelectedAction(action) {
+  const ids = getSelectedRowIDs();
+  if (!ids.length) return;
+  const isCover = action === "cover";
+  const api = isCover ? pools.shadow.coverApi : pools.watchlist.refreshApi;
+  const label = isCover ? "Cover" : "刷新最新价";
+  const button = isCover ? coverSelectedBtn : refreshSelectedBtn;
+  if (!window.confirm(`确认对选中的 ${ids.length} 条记录执行${label}？`)) return;
+  button.disabled = true;
+  setStatus(isCover ? "Covering" : "Refreshing");
+  try {
+    const res = await fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const result = await res.json();
+    setStatus(`Done updated=${toNumber(result.updated)} skipped=${toNumber(result.skipped)} failed=${toNumber(result.failed)}`);
+    await loadRows();
+  } catch (err) {
+    setStatus(err.message);
+  } finally {
+    updateSelectionState();
+  }
 }
 
 async function deleteRows(ids) {

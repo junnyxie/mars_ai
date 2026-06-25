@@ -511,6 +511,10 @@ func (r *VolumeRunner) RunAllDays(ctx context.Context, days int) (CombinedRunRes
 }
 
 func (r *VolumeRunner) RunShadowCover(ctx context.Context) (CoverRunResult, error) {
+	return r.RunShadowCoverIDs(ctx, nil)
+}
+
+func (r *VolumeRunner) RunShadowCoverIDs(ctx context.Context, ids []int64) (CoverRunResult, error) {
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
@@ -527,7 +531,7 @@ func (r *VolumeRunner) RunShadowCover(ctx context.Context) (CoverRunResult, erro
 	if err := ensureShadowStockTable(ctx, r.db); err != nil {
 		return CoverRunResult{}, err
 	}
-	rows, err := LoadShadowCoverRows(ctx, r.db)
+	rows, err := LoadShadowCoverRows(ctx, r.db, ids)
 	if err != nil {
 		return CoverRunResult{}, err
 	}
@@ -637,10 +641,14 @@ func (r *VolumeRunner) RunWatchlist(ctx context.Context) (WatchlistRunResult, er
 }
 
 func (r *VolumeRunner) UpdateWatchlistPrices(ctx context.Context) (WatchlistRunResult, error) {
+	return r.UpdateWatchlistPriceIDs(ctx, nil)
+}
+
+func (r *VolumeRunner) UpdateWatchlistPriceIDs(ctx context.Context, ids []int64) (WatchlistRunResult, error) {
 	if err := ensureWatchlistStockTable(ctx, r.db); err != nil {
 		return WatchlistRunResult{}, err
 	}
-	rows, err := LoadWatchlistUpdateRows(ctx, r.db)
+	rows, err := LoadWatchlistUpdateRows(ctx, r.db, ids)
 	if err != nil {
 		return WatchlistRunResult{}, err
 	}
@@ -888,6 +896,8 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	mux.HandleFunc("/api/volume-stocks/gpt-star", r.handleUpdateVolumeGPTStar)
 	mux.HandleFunc("/api/shadow-stocks/gpt-star", r.handleUpdateShadowGPTStar)
 	mux.HandleFunc("/api/breakout-stocks/gpt-star", r.handleUpdateBreakoutGPTStar)
+	mux.HandleFunc("/api/shadow-stocks/cover", r.handleRunShadowCoverIDs)
+	mux.HandleFunc("/api/watchlist-stocks/refresh", r.handleRefreshWatchlistIDs)
 	mux.HandleFunc("/api/watchlist-stocks/delete", r.handleDeleteWatchlistStocks)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
@@ -1075,6 +1085,67 @@ func (r *VolumeRunner) handleDeleteShadowStocks(w http.ResponseWriter, req *http
 
 func (r *VolumeRunner) handleDeleteBreakoutStocks(w http.ResponseWriter, req *http.Request) {
 	r.handleDeleteStockPoolRows(w, req, "breakout_stock")
+}
+
+func (r *VolumeRunner) handleRunShadowCoverIDs(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload deleteStockPoolRowsRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	ids, err := normalizeIDs(payload.IDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Hour)
+	defer cancel()
+	result, err := r.RunShadowCoverIDs(ctx, ids)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, id := range ids {
+		if err := SyncWatchlistFromPoolRow(req.Context(), r.db, "shadow_stock", id); err != nil {
+			log.Printf("[watchlist] sync after selected shadow cover failed id=%d err=%v", id, err)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (r *VolumeRunner) handleRefreshWatchlistIDs(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.IsRunning() {
+		http.Error(w, "stock pool job is already running", http.StatusConflict)
+		return
+	}
+	var payload deleteStockPoolRowsRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	ids, err := normalizeIDs(payload.IDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Hour)
+	defer cancel()
+	result, err := r.UpdateWatchlistPriceIDs(ctx, ids)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (r *VolumeRunner) handleDeleteWatchlistStocks(w http.ResponseWriter, req *http.Request) {
@@ -1363,28 +1434,11 @@ func DeleteStockPoolRows(ctx context.Context, db *sql.DB, table string, ids []in
 	if !isStockPoolTable(table) {
 		return 0, fmt.Errorf("invalid stock pool table")
 	}
-	if len(ids) == 0 {
-		return 0, fmt.Errorf("ids cannot be empty")
+	normalized, err := normalizeIDs(ids)
+	if err != nil {
+		return 0, err
 	}
-	if len(ids) > 500 {
-		return 0, fmt.Errorf("delete at most 500 rows once")
-	}
-
-	seen := make(map[int64]struct{}, len(ids))
-	args := make([]any, 0, len(ids))
-	for _, id := range ids {
-		if id <= 0 {
-			return 0, fmt.Errorf("invalid id")
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		args = append(args, id)
-	}
-	if len(args) == 0 {
-		return 0, fmt.Errorf("ids cannot be empty")
-	}
+	args := idsToArgs(normalized)
 
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
 	sqlText := fmt.Sprintf("DELETE FROM %s WHERE id IN (%s)", table, placeholders)
@@ -1418,27 +1472,11 @@ func DeleteWatchlistRows(ctx context.Context, db *sql.DB, ids []int64) (int64, e
 	if err := ensureWatchlistStockTable(ctx, db); err != nil {
 		return 0, err
 	}
-	if len(ids) == 0 {
-		return 0, fmt.Errorf("ids cannot be empty")
+	normalized, err := normalizeIDs(ids)
+	if err != nil {
+		return 0, err
 	}
-	if len(ids) > 500 {
-		return 0, fmt.Errorf("delete at most 500 rows once")
-	}
-	seen := make(map[int64]struct{}, len(ids))
-	args := make([]any, 0, len(ids))
-	for _, id := range ids {
-		if id <= 0 {
-			return 0, fmt.Errorf("invalid id")
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		args = append(args, id)
-	}
-	if len(args) == 0 {
-		return 0, fmt.Errorf("ids cannot be empty")
-	}
+	args := idsToArgs(normalized)
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
 	result, err := db.ExecContext(ctx, fmt.Sprintf("DELETE FROM watchlist_stock WHERE id IN (%s)", placeholders), args...)
 	if err != nil {
@@ -1449,6 +1487,39 @@ func DeleteWatchlistRows(ctx context.Context, db *sql.DB, ids []int64) (int64, e
 		return 0, fmt.Errorf("read deleted rows failed: %w", err)
 	}
 	return deleted, nil
+}
+
+func normalizeIDs(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("ids cannot be empty")
+	}
+	if len(ids) > 500 {
+		return nil, fmt.Errorf("operate at most 500 rows once")
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	result := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("invalid id")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("ids cannot be empty")
+	}
+	return result, nil
+}
+
+func idsToArgs(ids []int64) []any {
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	return args
 }
 
 func UpdateStockPoolStart(ctx context.Context, db *sql.DB, table string, id int64, start int) error {
@@ -1680,16 +1751,26 @@ func watchlistSourcePool(table string) (string, error) {
 	}
 }
 
-func LoadShadowCoverRows(ctx context.Context, db *sql.DB) ([]ShadowCoverRow, error) {
-	rows, err := db.QueryContext(ctx, `
+func LoadShadowCoverRows(ctx context.Context, db *sql.DB, ids []int64) ([]ShadowCoverRow, error) {
+	args := []any{}
+	where := "WHERE s.region IN ('SH', 'SZ')"
+	if len(ids) > 0 {
+		normalized, err := normalizeIDs(ids)
+		if err != nil {
+			return nil, err
+		}
+		args = idsToArgs(normalized)
+		where += fmt.Sprintf(" AND ss.id IN (%s)", strings.TrimRight(strings.Repeat("?,", len(args)), ","))
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 SELECT ss.id, ss.stock_code, ss.stock_name, COALESCE(s.region, ''),
        ss.sector_id, ss.sector_name, COALESCE(ss.max_price, 0),
        ss.gmt_create, ss.first_cover_price
 FROM shadow_stock ss
 JOIN stock s ON s.stock_code = ss.stock_code
-WHERE s.region IN ('SH', 'SZ')
+%s
 ORDER BY ss.id
-`)
+`, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("load shadow cover rows failed: %w", err)
 	}
@@ -1722,14 +1803,24 @@ ORDER BY ss.id
 	return result, nil
 }
 
-func LoadWatchlistUpdateRows(ctx context.Context, db *sql.DB) ([]watchlistUpdateRow, error) {
-	rows, err := db.QueryContext(ctx, `
+func LoadWatchlistUpdateRows(ctx context.Context, db *sql.DB, ids []int64) ([]watchlistUpdateRow, error) {
+	args := []any{}
+	where := "WHERE s.region IN ('SH', 'SZ')"
+	if len(ids) > 0 {
+		normalized, err := normalizeIDs(ids)
+		if err != nil {
+			return nil, err
+		}
+		args = idsToArgs(normalized)
+		where += fmt.Sprintf(" AND ws.id IN (%s)", strings.TrimRight(strings.Repeat("?,", len(args)), ","))
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 SELECT ws.id, ws.stock_code, ws.stock_name, COALESCE(s.region, ''),
        ws.sector_id, ws.sector_name, COALESCE(ws.join_price, 0)
 FROM watchlist_stock ws
 JOIN stock s ON s.stock_code = ws.stock_code
-WHERE s.region IN ('SH', 'SZ')
-ORDER BY ws.id`)
+%s
+ORDER BY ws.id`, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("load watchlist rows failed: %w", err)
 	}
