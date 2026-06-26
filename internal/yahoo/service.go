@@ -155,12 +155,14 @@ type stockLevelItem struct {
 }
 
 type updateStockLevelsRequest struct {
-	Rows []stockLevelItem `json:"rows"`
+	Rows         []stockLevelItem `json:"rows"`
+	SkipExisting bool             `json:"skip_existing"`
 }
 
 type updateStockLevelsResponse struct {
 	Updated int `json:"updated"`
 	Missing int `json:"missing"`
+	Skipped int `json:"skipped"`
 }
 
 func NewVolumeRunner(db *sql.DB) *VolumeRunner {
@@ -938,7 +940,7 @@ func (r *VolumeRunner) ServeHTTP(addr string) error {
 	go r.scheduleDaily()
 	go r.scheduleMacroDaily()
 	log.Printf("[server] listen addr=%s", addr)
-	return http.ListenAndServe(addr, withWebLog(mux, webLogger))
+	return http.ListenAndServe(addr, withWebLog(withCORS(mux), webLogger))
 }
 
 func parseRunDays(req *http.Request) (int, error) {
@@ -983,6 +985,46 @@ func withWebLog(next http.Handler, logger *log.Logger) http.Handler {
 			time.Since(start).Milliseconds(),
 		)
 	})
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		origin := req.Header.Get("Origin")
+		if isAllowedCORSOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		}
+		if req.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
+}
+
+func isAllowedCORSOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	allowedPrefixes := []string{
+		"http://127.0.0.1:",
+		"http://localhost:",
+		"http://0.0.0.0:",
+	}
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(origin, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range []string{":5173", ":4173"} {
+		if (strings.HasPrefix(origin, "http://") || strings.HasPrefix(origin, "https://")) && strings.HasSuffix(origin, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *VolumeRunner) handleVolumeStocks(w http.ResponseWriter, req *http.Request) {
@@ -1056,7 +1098,7 @@ func (r *VolumeRunner) handleUpdateStockLevels(w http.ResponseWriter, req *http.
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
-	result, err := UpdateStockLevels(req.Context(), r.db, payload.Rows)
+	result, err := UpdateStockLevels(req.Context(), r.db, payload.Rows, payload.SkipExisting)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1309,7 +1351,7 @@ func QueryVolumeStocks(ctx context.Context, db *sql.DB, req *http.Request) (Stoc
 	return queryStockPoolRows(ctx, db, req, "volume_stock")
 }
 
-func UpdateStockLevels(ctx context.Context, db *sql.DB, rows []stockLevelItem) (updateStockLevelsResponse, error) {
+func UpdateStockLevels(ctx context.Context, db *sql.DB, rows []stockLevelItem, skipExisting bool) (updateStockLevelsResponse, error) {
 	if err := ensureStockLevelColumn(ctx, db); err != nil {
 		return updateStockLevelsResponse{}, err
 	}
@@ -1329,10 +1371,26 @@ func UpdateStockLevels(ctx context.Context, db *sql.DB, rows []stockLevelItem) (
 		if len(code) != 6 {
 			return result, fmt.Errorf("invalid stock_code: %s", code)
 		}
-		if level != "A" && level != "B" && level != "C" {
+		if level != "" && level != "A" && level != "B" && level != "C" {
 			return result, fmt.Errorf("invalid level for %s: %s", code, level)
 		}
-		execResult, err := db.ExecContext(ctx, "UPDATE stock SET level = ?, gmt_update = CURRENT_TIMESTAMP WHERE stock_code = ?", level, code)
+		var existingLevel sql.NullString
+		if err := db.QueryRowContext(ctx, "SELECT level FROM stock WHERE stock_code = ?", code).Scan(&existingLevel); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				result.Missing++
+				continue
+			}
+			return result, fmt.Errorf("query stock level stock_code=%s failed: %w", code, err)
+		}
+		if skipExisting && strings.TrimSpace(existingLevel.String) != "" {
+			result.Skipped++
+			continue
+		}
+		var levelValue any
+		if level != "" {
+			levelValue = level
+		}
+		execResult, err := db.ExecContext(ctx, "UPDATE stock SET level = ?, gmt_update = CURRENT_TIMESTAMP WHERE stock_code = ?", levelValue, code)
 		if err != nil {
 			return result, fmt.Errorf("update stock level stock_code=%s failed: %w", code, err)
 		}
@@ -2218,6 +2276,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	coverBelow := query.Get("cover_below")
 	starred := query.Get("starred")
 	levelFilter := query.Get("level")
+	unclassified := query.Get("unclassified")
 	sortField := allowedSortField(table, query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -2277,6 +2336,9 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	}
 	if starred == "1" {
 		where += " AND COALESCE(p.`start`, 0) = 1"
+	}
+	if unclassified == "1" {
+		where += " AND COALESCE(s.level, '') = ''"
 	}
 	levelWhere, levelArgs, err := buildLevelFilterSQL(levelFilter)
 	if err != nil {

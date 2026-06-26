@@ -731,6 +731,16 @@ tbody tr:hover {
   text-align: center;
 }
 
+.stock-level-select {
+  width: 58px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-weight: 900;
+  text-align: center;
+}
+
 .muted {
   color: var(--muted);
 }

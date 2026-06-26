@@ -23,6 +23,7 @@ const menuEl = document.querySelector(".menu");
 const selectAllRowsEl = document.querySelector("#selectAllRows");
 const deleteSelectedBtn = document.querySelector("#deleteSelectedBtn");
 const exportBtn = document.querySelector("#exportBtn");
+const exportUnclassifiedBtn = document.querySelector("#exportUnclassifiedBtn");
 const coverSelectedBtn = document.querySelector("#coverSelectedBtn");
 const refreshSelectedBtn = document.querySelector("#refreshSelectedBtn");
 const macroPanelEl = document.querySelector("#macroPanel");
@@ -261,7 +262,7 @@ function render(rows, poolName) {
     <tr>
       <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
       <td class="star-col"><button class="star-btn ${toNumber(row.start) === 1 ? "active" : ""}" type="button" data-id="${row.id}" data-start="${toNumber(row.start) === 1 ? 1 : 0}" aria-label="标星 ${row.stock_code}">★</button></td>
-      <td class="stock-level-cell ai-level-${row.level || "empty"}">${row.level || "-"}</td>
+      <td class="stock-level-cell">${stockLevelSelect(row.stock_code, row.level)}</td>
       <td class="code-cell">${stockCodeCell(row)}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
@@ -305,7 +306,7 @@ function renderWatchlist(rows) {
     <tr>
       <td class="select-col"><input class="row-check" type="checkbox" value="${row.id}" aria-label="选择 ${row.stock_code}" /></td>
       <td class="star-col pool-only"></td>
-      <td class="stock-level-cell ai-level-${row.level || "empty"}">${row.level || "-"}</td>
+      <td class="stock-level-cell">${stockLevelSelect(row.stock_code, row.level)}</td>
       <td class="code-cell">${stockCodeCell(row)}</td>
       <td>${row.stock_name}</td>
       <td>${row.sector_name || ""}</td>
@@ -381,6 +382,7 @@ function applyPool(poolName) {
     el.style.display = isWatchlist ? "none" : "";
   });
   exportBtn.style.display = isWatchlist ? "none" : "";
+  exportUnclassifiedBtn.style.display = isWatchlist ? "none" : "";
   coverSelectedBtn.style.display = poolName === "shadow" ? "" : "none";
   refreshSelectedBtn.style.display = isWatchlist ? "" : "none";
   maxAmountEl.nextElementSibling.textContent = isWatchlist ? "最高实时价" : "最高成交额(亿)";
@@ -397,7 +399,11 @@ document.querySelector("#searchBtn").addEventListener("click", () => {
 });
 
 exportBtn.addEventListener("click", () => {
-  exportForChatGPT();
+  exportForChatGPT(false);
+});
+
+exportUnclassifiedBtn.addEventListener("click", () => {
+  exportForChatGPT(true);
 });
 
 coverBelowEl.addEventListener("change", () => {
@@ -514,11 +520,11 @@ saveAILevelButton.addEventListener("click", async () => {
     const res = await fetch("/api/stocks/level", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows })
+      body: JSON.stringify({ rows, skip_existing: true })
     });
     if (!res.ok) throw new Error(await res.text());
     const result = await res.json();
-    setAIMergeHint(`已写入 ${toNumber(result.updated)} 条，未匹配 ${toNumber(result.missing)} 条`);
+    setAIMergeHint(`已写入 ${toNumber(result.updated)} 条，已分类跳过 ${toNumber(result.skipped)} 条，未匹配 ${toNumber(result.missing)} 条`);
   } catch (err) {
     setAIMergeHint(err.message);
   } finally {
@@ -529,6 +535,11 @@ saveAILevelButton.addEventListener("click", async () => {
 rowsEl.addEventListener("change", event => {
   if (event.target.classList.contains("row-check")) {
     updateSelectionState();
+    return;
+  }
+  const levelSelect = event.target.closest(".stock-level-select");
+  if (levelSelect) {
+    updateStockLevel(levelSelect);
   }
 });
 
@@ -663,10 +674,15 @@ async function toggleStart(button) {
   }
 }
 
-async function exportForChatGPT() {
+async function exportForChatGPT(unclassifiedOnly) {
   const params = buildQueryParams();
   params.set("pool", currentPool);
-  exportBtn.disabled = true;
+  if (unclassifiedOnly) {
+    params.set("unclassified", "1");
+    params.delete("level");
+  }
+  const button = unclassifiedOnly ? exportUnclassifiedBtn : exportBtn;
+  button.disabled = true;
   setStatus("Exporting");
   try {
     const res = await fetch(`/api/stock-pool/export?${params}`);
@@ -677,8 +693,51 @@ async function exportForChatGPT() {
   } catch (err) {
     setStatus(err.message);
   } finally {
-    exportBtn.disabled = false;
+    button.disabled = false;
   }
+}
+
+function stockLevelSelect(stockCode, level) {
+  const value = (level || "").toUpperCase();
+  return `
+    <select class="stock-level-select ai-level-${value || "empty"}" data-code="${escapeHTML(stockCode || "")}">
+      <option value="" ${value === "" ? "selected" : ""}>-</option>
+      ${["A", "B", "C"].map(item => `<option value="${item}" ${value === item ? "selected" : ""}>${item}</option>`).join("")}
+    </select>
+  `;
+}
+
+async function updateStockLevel(select) {
+  const stockCode = select.dataset.code;
+  const level = select.value;
+  if (!stockCode) return;
+  select.disabled = true;
+  setStatus("Saving");
+  try {
+    const res = await fetch("/api/stocks/level", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows: [{ stock_code: stockCode, level }] })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    select.className = `stock-level-select ai-level-${level || "empty"}`;
+    setStatus("Ready");
+    if (levelFilterEl.value && !levelMatchesFilter(level, levelFilterEl.value)) {
+      await loadRows();
+    }
+  } catch (err) {
+    setStatus(err.message);
+    await loadRows();
+  } finally {
+    select.disabled = false;
+  }
+}
+
+function levelMatchesFilter(level, filter) {
+  const value = (level || "").toUpperCase();
+  if (!filter) return true;
+  if (filter === "AB") return value === "A" || value === "B";
+  return value === filter;
 }
 
 async function copyText(text) {
@@ -753,7 +812,11 @@ function parseStructuredAIRatingRows(text, result) {
 				markdownHeader = cells;
 				continue;
 			}
-			if (markdownHeader) appendStructuredAIRating(result, markdownHeader, cells);
+			if (markdownHeader) {
+				appendStructuredAIRating(result, markdownHeader, cells);
+			} else {
+				appendStructuredAIRatingByContent(result, cells);
+			}
 			continue;
 		}
 		if (line.includes("\t")) {
@@ -762,7 +825,11 @@ function parseStructuredAIRatingRows(text, result) {
 				tabHeader = cells;
 				continue;
 			}
-			if (tabHeader) appendStructuredAIRating(result, tabHeader, cells);
+			if (tabHeader) {
+				appendStructuredAIRating(result, tabHeader, cells);
+			} else {
+				appendStructuredAIRatingByContent(result, cells);
+			}
 			continue;
 		}
 		if (line.includes(",")) {
@@ -771,7 +838,11 @@ function parseStructuredAIRatingRows(text, result) {
 				csvHeader = cells;
 				continue;
 			}
-			if (csvHeader) appendStructuredAIRating(result, csvHeader, cells);
+			if (csvHeader) {
+				appendStructuredAIRating(result, csvHeader, cells);
+			} else {
+				appendStructuredAIRatingByContent(result, cells);
+			}
 		}
 	}
 }
@@ -883,6 +954,58 @@ function appendStructuredAIRating(result, headers, cells) {
 	};
 	const previous = result.get(next.code);
 	result.set(next.code, mergeSameModelRating(previous, next));
+}
+
+function appendStructuredAIRatingByContent(result, cells) {
+	const codeIndex = cells.findIndex(cell => /\b\d{6}\b/.test(cleanAICell(cell)));
+	if (codeIndex < 0) return;
+	const levelIndex = findAILevelCellIndex(cells, codeIndex);
+	if (levelIndex < 0) return;
+	const codeMatch = cleanAICell(cells[codeIndex]).match(/\b(\d{6})\b/);
+	const level = extractAILevelFromCell(cells[levelIndex]);
+	if (!codeMatch || !level) return;
+	const next = {
+		code: codeMatch[1],
+		name: extractAINameFromCells(cells, codeIndex, levelIndex),
+		level,
+		summary: extractAISummaryFromCells(cells, codeIndex, levelIndex)
+	};
+	const previous = result.get(next.code);
+	result.set(next.code, mergeSameModelRating(previous, next));
+}
+
+function findAILevelCellIndex(cells, codeIndex) {
+	const exactIndexes = cells
+		.map((cell, index) => ({ index, level: extractAILevelFromCell(cell) }))
+		.filter(item => item.level && item.index !== codeIndex)
+		.map(item => item.index);
+	if (!exactIndexes.length) return -1;
+	const beforeCode = exactIndexes.filter(index => index < codeIndex);
+	if (beforeCode.length) return beforeCode[beforeCode.length - 1];
+	return exactIndexes[0];
+}
+
+function extractAILevelFromCell(value) {
+	const cell = cleanAICell(value)
+		.replace(/[ＡＢＣ]/g, char => String.fromCharCode(char.charCodeAt(0) - 65248))
+		.toUpperCase();
+	const match = cell.match(/^([ABC])(?:类|级|档)?$/);
+	return match ? match[1] : "";
+}
+
+function extractAINameFromCells(cells, codeIndex, levelIndex) {
+	const value = cleanAICell(cells[codeIndex + 1] || "");
+	if (!value || codeIndex + 1 === levelIndex || /\b\d{6}\b/.test(value) || extractAILevelFromCell(value)) return "";
+	return value;
+}
+
+function extractAISummaryFromCells(cells, codeIndex, levelIndex) {
+	for (let index = cells.length - 1; index >= 0; index -= 1) {
+		if (index === codeIndex || index === levelIndex || index === codeIndex + 1) continue;
+		const value = cleanAISummary(cells[index]);
+		if (value && !/\b\d{6}\b/.test(value) && !extractAILevelFromCell(value)) return value;
+	}
+	return "";
 }
 
 function extractAIHeadingLevel(text) {

@@ -61,6 +61,39 @@ tonghuashun returned verification page
 go run ./cmd/stock-sector --check-cookie
 ```
 
+## 前后端分离 React 版
+
+旧版页面仍保留在本工程 `web/` 目录，Go 服务默认首页不变。
+
+React 新版前端独立放在同级目录：
+
+```text
+/Users/junny/Documents/Codex/mars_ai_frontend
+```
+
+本地启动后端：
+
+```bash
+./stock-sector --config config/config.json --serve
+```
+
+本地启动 React 前端：
+
+```bash
+cd /Users/junny/Documents/Codex/mars_ai_frontend
+cp .env.example .env
+npm install
+npm run dev
+```
+
+默认访问：
+
+```text
+http://127.0.0.1:5173
+```
+
+Go 后端已支持 React 开发端口的 CORS；生产环境建议用 nginx 将 `/api/*` 和 `/health` 代理到 Go 服务。
+
 ## 常用命令
 
 下载依赖：
