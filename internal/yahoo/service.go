@@ -2277,6 +2277,9 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 	starred := query.Get("starred")
 	levelFilter := query.Get("level")
 	unclassified := query.Get("unclassified")
+	if unclassified == "1" {
+		levelFilter = ""
+	}
 	sortField := allowedSortField(table, query.Get("sort"))
 	sortDir := "DESC"
 	if query.Get("dir") == "asc" {
@@ -2338,7 +2341,7 @@ func queryStockPoolRows(ctx context.Context, db *sql.DB, req *http.Request, tabl
 		where += " AND COALESCE(p.`start`, 0) = 1"
 	}
 	if unclassified == "1" {
-		where += " AND COALESCE(s.level, '') = ''"
+		where += " AND COALESCE(TRIM(s.level), '') = ''"
 	}
 	levelWhere, levelArgs, err := buildLevelFilterSQL(levelFilter)
 	if err != nil {
